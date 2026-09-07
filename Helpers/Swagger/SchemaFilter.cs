@@ -1,0 +1,23 @@
+﻿using Microsoft.OpenApi.Models;
+using Swashbuckle.AspNetCore.SwaggerGen;
+
+namespace APISmartCity.Helpers
+{
+    public class SchemaFilter : ISchemaFilter
+    {
+        public void Apply(OpenApiSchema schema, SchemaFilterContext context)
+        {
+            if (schema.Properties == null)
+            {
+                return;
+            }
+            foreach (KeyValuePair<string, OpenApiSchema> property in schema.Properties)
+            {
+                if (property.Value.Default != null && property.Value.Example == null)
+                {
+                    property.Value.Example = property.Value.Default;
+                }
+            }
+        }
+    }
+}

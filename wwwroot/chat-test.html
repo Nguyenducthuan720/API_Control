@@ -1,0 +1,421 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Test Chat Socket</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <style>
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background-color: #f8f9fa;
+        }
+        .chat-container {
+            height: 400px;
+            overflow-y: auto;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            padding: 10px;
+            margin-bottom: 10px;
+            background-color: #fff;
+        }
+        .message-wrapper {
+            width: 100%;
+            margin-bottom: 10px;
+            display: flex;
+            flex-direction: column;
+        }
+        .message {
+            padding: 8px 12px;
+            border-radius: 15px;
+            max-width: 70%;
+            word-wrap: break-word;
+        }
+        .sent-wrapper {
+            align-items: flex-end;
+        }
+        .received-wrapper {
+            align-items: flex-start;
+        }
+        .sent {
+            background-color: #0084ff;
+            color: white;
+            margin-left: auto;
+        }
+        .received {
+            background-color: #e9ecef;
+            color: black;
+        }
+        .message-header {
+            font-size: 0.85em;
+            margin-bottom: 3px;
+            padding: 0 12px;
+        }
+        .sent-wrapper .message-header {
+            color: #666;
+            text-align: right;
+        }
+        .received-wrapper .message-header {
+            color: #666;
+            text-align: left;
+        }
+        .message-content {
+            word-break: break-word;
+        }
+        .system-message {
+            text-align: center;
+            color: #6c757d;
+            font-style: italic;
+            margin: 10px 0;
+            font-size: 0.9em;
+        }
+        .form-container {
+            background-color: white;
+            padding: 1rem;
+            border-radius: 0.25rem;
+            box-shadow: 0 0.125rem 0.25rem rgba(0, 0, 0, 0.075);
+        }
+    </style>
+</head>
+<body>
+    <div class="container mt-5">
+        <div class="row">
+            <div class="col-md-4">
+                <!-- Thông tin kết nối -->
+                <div class="card">
+                    <div class="card-header">
+                        Thông tin kết nối
+                    </div>
+                    <div class="card-body">
+                        <div class="mb-3">
+                            <label class="form-label">Token</label>
+                            <input type="text" class="form-control" id="token" placeholder="Nhập token...">
+                        </div>
+                        <div class="mb-3">
+                            <label class="form-label">Tên người dùng</label>
+                            <input type="text" class="form-control" id="userName" placeholder="Nhập tên người dùng...">
+                        </div>
+                        <div id="userInfo" class="alert alert-info mb-3" style="display: none;">
+                            <!-- Thông tin user sẽ được hiển thị ở đây -->
+                        </div>
+                        <div class="mb-3">
+                            <label class="form-label">Factor ID</label>
+                            <input type="text" class="form-control" id="factorID" value="TEST">
+                        </div>
+                        <div class="mb-3">
+                            <label class="form-label">Entry ID</label>
+                            <input type="text" class="form-control" id="entryID" value="TEST">
+                        </div>
+                        <div class="mb-3">
+                            <label class="form-label">OID</label>
+                            <input type="text" class="form-control" id="oid" value="1">
+                        </div>
+                        <button class="btn btn-primary" onclick="connect()">Kết nối</button>
+                        <button class="btn btn-danger" onclick="disconnect()">Ngắt kết nối</button>
+                    </div>
+                </div>
+            </div>
+            <div class="col-md-8">
+                <!-- Khung chat -->
+                <div class="card">
+                    <div class="card-header">
+                        Chat Room: <span id="roomName"></span>
+                    </div>
+                    <div class="card-body">
+                        <div class="chat-container" id="messageContainer"></div>
+                        <div class="input-group">
+                            <input type="text" class="form-control" id="messageInput" placeholder="Nhập tin nhắn...">
+                            <button class="btn btn-primary" onclick="sendMessage()">Gửi</button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/microsoft-signalr/6.0.1/signalr.js"></script>
+    <script>
+        let connection = null;
+        let isConnected = false;
+        let currentUser = null;
+
+        // Hàm decode JWT token
+        function parseJwt(token) {
+            try {
+                const base64Url = token.split('.')[1];
+                const base64 = base64Url.replace(/-/g, '+').replace(/_/g, '/');
+                const jsonPayload = decodeURIComponent(atob(base64).split('').map(function(c) {
+                    return '%' + ('00' + c.charCodeAt(0).toString(16)).slice(-2);
+                }).join(''));
+                return JSON.parse(jsonPayload);
+            } catch (e) {
+                console.error('Error parsing JWT:', e);
+                return null;
+            }
+        }
+
+        // Hàm lấy thông tin user từ token
+        function getUserFromToken(token) {
+            const decoded = parseJwt(token);
+            if (decoded) {
+                return {
+                    userID: decoded.userID || decoded.UserID,
+                    userName: decoded.userName || decoded.UserName,
+                    language: decoded.language || decoded.Language
+                };
+            }
+            return null;
+        }
+
+        // Khởi tạo kết nối SignalR
+        async function initializeSignalRConnection() {
+            try {
+                connection = new signalR.HubConnectionBuilder()
+                    .withUrl("/chathub")
+                    .withAutomaticReconnect()
+                    .build();
+
+                connection.on("ReceiveMessage", (message) => {
+                    console.log('Current User:', currentUser);
+                    console.log('Received Message:', message);
+                    // Kiểm tra nếu là tin nhắn của người dùng hiện tại
+                    const isCurrentUser = currentUser && 
+                        (message.userID === currentUser.userID || message.userName === currentUser.userName);
+                    displayMessage(message, isCurrentUser ? 'sent' : 'received');
+                });
+
+                connection.on("UserJoined", (data) => {
+                    displaySystemMessage(`${data.userName || 'User ' + data.userID} đã tham gia phòng chat`);
+                });
+
+                connection.on("UserLeft", (data) => {
+                    displaySystemMessage(`${data.userName || 'User ' + data.userID} đã rời phòng chat`);
+                });
+
+                await connection.start();
+                console.log("SignalR Connected.");
+                return true;
+            } catch (err) {
+                console.error("SignalR Connection Error:", err);
+                displaySystemMessage("Lỗi kết nối SignalR: " + err.message);
+                return false;
+            }
+        }
+
+        // Kết nối vào phòng chat
+        async function connect() {
+            const token = document.getElementById('token').value;
+            const userName = document.getElementById('userName').value.trim();
+            
+            if (!token) {
+                displaySystemMessage("Vui lòng nhập token!");
+                return;
+            }
+
+            if (!userName) {
+                displaySystemMessage("Vui lòng nhập tên người dùng!");
+                return;
+            }
+
+            try {
+                // Lấy thông tin user từ token
+                currentUser = getUserFromToken(token);
+                if (!currentUser) {
+                    displaySystemMessage("Token không hợp lệ hoặc không chứa thông tin user!");
+                    return;
+                }
+
+                // Cập nhật tên người dùng
+                currentUser.userName = userName;
+
+                // Hiển thị thông tin user
+                document.getElementById('userInfo').innerHTML = `
+                    <strong>User ID:</strong> ${currentUser.userID}<br>
+                    <strong>User Name:</strong> ${currentUser.userName}<br>
+                    <strong>Language:</strong> ${currentUser.language || 'N/A'}
+                `;
+
+                // Đảm bảo SignalR đã kết nối
+                if (!connection || connection.state !== signalR.HubConnectionState.Connected) {
+                    const signalRConnected = await initializeSignalRConnection();
+                    if (!signalRConnected) {
+                        displaySystemMessage("Không thể kết nối đến server chat. Vui lòng thử lại sau.");
+                        return;
+                    }
+                }
+
+                const data = {
+                    userID: currentUser.userID,
+                    userName: currentUser.userName,
+                    factorID: document.getElementById('factorID').value,
+                    entryID: document.getElementById('entryID').value,
+                    oid: document.getElementById('oid').value
+                };
+
+                // Kết nối vào group sau khi kết nối SignalR thành công
+                const groupName = `Chat_${data.factorID}_${data.entryID}_${data.oid}`;
+                await connection.invoke("JoinGroup", groupName);
+
+                isConnected = true;
+                document.getElementById('roomName').textContent = groupName;
+                displaySystemMessage("Đã kết nối thành công!");
+            } catch (error) {
+                console.error('Connection Error:', error);
+                displaySystemMessage("Lỗi kết nối: " + (error.message || "Không thể kết nối đến server"));
+            }
+        }
+
+        // Ngắt kết nối
+        async function disconnect() {
+            if (!isConnected) {
+                displaySystemMessage("Chưa kết nối!");
+                return;
+            }
+
+            const token = document.getElementById('token').value;
+            if (!token) {
+                displaySystemMessage("Vui lòng nhập token!");
+                return;
+            }
+
+            try {
+                const data = {
+                    userID: 1,
+                    factorID: document.getElementById('factorID').value,
+                    entryID: document.getElementById('entryID').value,
+                    oid: document.getElementById('oid').value
+                };
+
+                // Rời khỏi group trước khi gọi API Disconnect
+                const groupName = `Chat_${data.factorID}_${data.entryID}_${data.oid}`;
+                await connection.invoke("LeaveGroup", groupName);
+
+                const response = await fetch('/api/ChatsSocket/Disconnect', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json; charset=UTF-8',
+                        'Accept': 'application/json; charset=UTF-8',
+                        'Authorization': 'Bearer ' + token
+                    },
+                    body: JSON.stringify(data)
+                });
+
+                const result = await response.json();
+                if (result.ErrorCode === "0") {
+                    isConnected = false;
+                    document.getElementById('roomName').textContent = "Chưa kết nối";
+                    displaySystemMessage("Đã ngắt kết nối!");
+                } else {
+                    displaySystemMessage("Lỗi ngắt kết nối: " + (result.Message || "Không xác định"));
+                }
+            } catch (error) {
+                console.error('Error:', error);
+                displaySystemMessage("Lỗi ngắt kết nối: " + (error.message || "Không xác định"));
+            }
+        }
+
+        // Gửi tin nhắn
+        async function sendMessage() {
+            if (!isConnected) {
+                displaySystemMessage("Vui lòng kết nối trước khi gửi tin nhắn!");
+                return;
+            }
+
+            const token = document.getElementById('token').value;
+            if (!token) {
+                displaySystemMessage("Vui lòng nhập token!");
+                return;
+            }
+
+            const messageInput = document.getElementById('messageInput');
+            const message = messageInput.value.trim();
+            if (!message) return;
+
+            const data = {
+                userID: currentUser.userID,
+                userName: currentUser.userName,
+                factorID: document.getElementById('factorID').value,
+                entryID: document.getElementById('entryID').value,
+                oid: document.getElementById('oid').value,
+                chatType: "TEXT",
+                chatMessage: message
+            };
+
+            try {
+                const response = await fetch('/api/ChatsSocket/SendMessage', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json; charset=UTF-8',
+                        'Accept': 'application/json; charset=UTF-8',
+                        'Authorization': 'Bearer ' + token
+                    },
+                    body: JSON.stringify(data)
+                });
+
+                const result = await response.json();
+                if (result.ErrorCode === "0") {
+                    messageInput.value = '';
+                    // Bỏ phần hiển thị tin nhắn ở đây vì sẽ nhận được từ SignalR
+                    // displayMessage({
+                    //     userID: currentUser.userID,
+                    //     userName: currentUser.userName,
+                    //     chatMessage: message,
+                    //     createdDate: new Date()
+                    // }, 'sent');
+                } else {
+                    displaySystemMessage("Lỗi gửi tin nhắn: " + (result.Message || "Không xác định"));
+                }
+            } catch (error) {
+                console.error('Error:', error);
+                displaySystemMessage("Lỗi gửi tin nhắn: " + (error.message || "Không xác định"));
+            }
+        }
+
+        // Hiển thị tin nhắn
+        function displayMessage(message, type) {
+            const container = document.getElementById('messageContainer');
+            const wrapperDiv = document.createElement('div');
+            wrapperDiv.className = `message-wrapper ${type}-wrapper`;
+            
+            const currentTime = new Date(message.createdDate).toLocaleTimeString('vi-VN', {
+                hour: '2-digit',
+                minute: '2-digit',
+                second: '2-digit'
+            });
+
+            // Tạo header với tên người dùng và thời gian
+            const headerDiv = document.createElement('div');
+            headerDiv.className = 'message-header';
+            headerDiv.textContent = `${message.userName || 'Anonymous'} - ${currentTime}`;
+
+            // Tạo nội dung tin nhắn
+            const messageDiv = document.createElement('div');
+            messageDiv.className = `message ${type}`;
+            messageDiv.innerHTML = `<div class="message-content">${message.chatMessage}</div>`;
+
+            // Thêm vào wrapper và container
+            wrapperDiv.appendChild(headerDiv);
+            wrapperDiv.appendChild(messageDiv);
+            container.appendChild(wrapperDiv);
+            container.scrollTop = container.scrollHeight;
+        }
+
+        // Hiển thị thông báo hệ thống
+        function displaySystemMessage(message) {
+            const container = document.getElementById('messageContainer');
+            const messageDiv = document.createElement('div');
+            messageDiv.className = 'system-message';
+            messageDiv.textContent = message;
+            container.appendChild(messageDiv);
+            container.scrollTop = container.scrollHeight;
+        }
+
+        // Xử lý Enter để gửi tin nhắn
+        document.getElementById('messageInput').addEventListener('keypress', function(e) {
+            if (e.key === 'Enter') {
+                sendMessage();
+            }
+        });
+    </script>
+</body>
+</html> 
