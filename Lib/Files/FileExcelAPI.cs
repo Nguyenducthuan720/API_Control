@@ -6,6 +6,7 @@ using DocumentFormat.OpenXml.Packaging;
 using GemBox.Spreadsheet;
 using SixLabors.ImageSharp;
 using SixLabors.ImageSharp.Processing;
+using System.Text.RegularExpressions;
 using System.Globalization;
 using System.Text.Json;
 
@@ -23,6 +24,49 @@ namespace DMS.Lib.Files
             string userFullName,
             ExcelToPdfService excelToPdfService)
         {
+            var savedExcelPath = ExportTemplateToExcel(templatePath, outputFolder, outputFileName,
+                jsonReplacements, signType, tablejson, userFullName);
+            var savedPdfPath = Path.Combine(outputFolder, $"{outputFileName}.pdf");
+
+            // === Convert Excel sang PDF ===
+            try
+            {
+                bool useGemBox = true;
+                try
+                {
+                    SpreadsheetInfo.SetLicense("FREE-LIMITED-KEY");
+                    var workbook = ExcelFile.Load(savedExcelPath);
+                    workbook.Save(savedPdfPath);
+                }
+                catch (Exception ex) //when (ex.Message.Contains("Free version limitation has been exceeded"))
+                {
+                    useGemBox = false;
+                }
+
+                if (!useGemBox)
+                {
+                    using var processedStream = new FileStream(savedExcelPath, FileMode.Open, FileAccess.Read);
+                    using var pdfStream = excelToPdfService.ConvertXlsxToPdfAsync(processedStream).Result;
+                    using (var fileStream = new FileStream(savedPdfPath, FileMode.Create, FileAccess.Write))
+                    {
+                        pdfStream.CopyTo(fileStream);
+                    }
+                }
+
+                return savedPdfPath;
+            }
+            catch (Exception ex)
+            {
+                return savedExcelPath;
+            }
+        }
+
+        public static string ExportTemplateToExcel(
+            string templatePath, string outputFolder, string outputFileName,
+            string jsonReplacements, string signType, string tablejson, string userFullName,
+            bool clearUnresolvedPlaceholders = false, bool preserveUnsignedSignatures = false,
+            bool preserveMissingValues = false)
+        {
             if (!File.Exists(templatePath))
                 throw new FileNotFoundException($"Không tìm thấy file template: {templatePath}");
 
@@ -32,7 +76,6 @@ namespace DMS.Lib.Files
             string fileExtension = Path.GetExtension(templatePath)?.ToLower();
             string tempXlsxPath = Path.Combine(outputFolder, $"{outputFileName}_temp.xlsx");
             string savedExcelPath = Path.Combine(outputFolder, $"{outputFileName}.xlsx");
-            string savedPdfPath = Path.Combine(outputFolder, $"{outputFileName}.pdf");
             string savedPngPath = Path.Combine(outputFolder, $"{outputFileName}.png");
 
             var replacements = JsonSerializer.Deserialize<Dictionary<string, object>>(jsonReplacements)
@@ -50,11 +93,25 @@ namespace DMS.Lib.Files
             {
                 foreach (var ws in wb.Worksheets)
                 {
+                    // One common 3:1 box, constrained by the smallest signature slot.
+                    var signatureSlots = ws.CellsUsed(c => !c.HasFormula &&
+                        c.GetString().Contains("@SignLink_", StringComparison.OrdinalIgnoreCase))
+                        .Select(c => c.MergedRange() ?? c.AsRange()).ToList();
+                    var signatureWidth = signatureSlots.Count == 0 ? 180d :
+                        Math.Min(180d, signatureSlots.Min(r => Math.Min(
+                            GetRangeWidthInPixels(ws, r) * .9,
+                            GetRangeHeightInPixels(ws, r) * .9 * 3)));
                     foreach (var kv in replacements)
                     {
                         string key = kv.Key;
                         //string val = kv.Value?.Trim() ?? "";
                         string val = kv.Value?.ToString()?.Trim() ?? "";
+                        if (preserveMissingValues && string.IsNullOrWhiteSpace(val))
+                            continue;
+                        if (preserveUnsignedSignatures && string.IsNullOrWhiteSpace(val) &&
+                            (key.StartsWith("@SignLink_", StringComparison.OrdinalIgnoreCase) ||
+                             key.StartsWith("@SignNote_", StringComparison.OrdinalIgnoreCase)))
+                            continue;
 
                         // === Xử lý chữ ký ===
                         if (key.StartsWith("@SignLink_", StringComparison.OrdinalIgnoreCase))
@@ -105,7 +162,19 @@ namespace DMS.Lib.Files
                                     int newWidth = Math.Max(1, (int)(img.Width * scale));
                                     int newHeight = Math.Max(1, (int)(img.Height * scale));
 
-                                    img.Mutate(x => x.Resize(newWidth, newHeight));
+                                    if (preserveUnsignedSignatures)
+                                    {
+                                        newWidth = Math.Max(1, (int)signatureWidth);
+                                        newHeight = Math.Max(1, (int)(signatureWidth / 3));
+                                        img.Mutate(x => x.Resize(new ResizeOptions
+                                        {
+                                            Size = new Size(newWidth, newHeight),
+                                            Mode = ResizeMode.Pad,
+                                            PadColor = Color.Transparent
+                                        }));
+                                    }
+                                    else
+                                        img.Mutate(x => x.Resize(newWidth, newHeight));
                                     img.SaveAsPng(ms);
                                     ms.Seek(0, SeekOrigin.Begin);
 
@@ -170,6 +239,8 @@ namespace DMS.Lib.Files
                 Console.WriteLine($"Còn placeholder @table_I không? {hasPlaceholder}");
                 InsertTableFromJson(wb, tablejson);
                 foreach (var ws in wb.Worksheets) RemoveCheckRows(ws);
+                if (clearUnresolvedPlaceholders)
+                    ClearUnresolvedPlaceholders(wb, preserveUnsignedSignatures);
                 foreach (var ws in wb.Worksheets)
                 {
                     foreach (var cell in ws.CellsUsed(c => c.HasFormula))
@@ -202,40 +273,26 @@ namespace DMS.Lib.Files
             }
                 
 
-            // === Convert Excel sang PDF ===
-            try
+            if (File.Exists(tempXlsxPath))
+                File.Delete(tempXlsxPath);
+            return savedExcelPath;
+        }
+
+        private static void ClearUnresolvedPlaceholders(XLWorkbook workbook, bool preserveSignatures)
+        {
+            const string pattern = @"(?<!\w)@[A-Za-z_][A-Za-z0-9_]*(?:%)?";
+            foreach (var worksheet in workbook.Worksheets)
             {
-                bool useGemBox = true;
-                try
+                foreach (var cell in worksheet.CellsUsed(c => !c.HasFormula && !c.Value.IsBlank))
                 {
-                    SpreadsheetInfo.SetLicense("FREE-LIMITED-KEY");
-                    var workbook = ExcelFile.Load(savedExcelPath);
-                    workbook.Save(savedPdfPath);
+                    var current = cell.GetString();
+                    var cleaned = Regex.Replace(current, pattern, match =>
+                        preserveSignatures && Regex.IsMatch(match.Value,
+                            @"^@Sign(?:Link|Note)_C(?:[1-9]|[1-9][0-9])$", RegexOptions.IgnoreCase)
+                            ? match.Value : string.Empty);
+                    if (!string.Equals(current, cleaned, StringComparison.Ordinal))
+                        cell.Value = cleaned;
                 }
-                catch (Exception ex) //when (ex.Message.Contains("Free version limitation has been exceeded"))
-                {
-                    useGemBox = false;
-                }
-
-                if (!useGemBox)
-                {
-                    using var processedStream = new FileStream(savedExcelPath, FileMode.Open, FileAccess.Read);
-                    using var pdfStream = excelToPdfService.ConvertXlsxToPdfAsync(processedStream).Result;
-                    using (var fileStream = new FileStream(savedPdfPath, FileMode.Create, FileAccess.Write))
-                    {
-                        pdfStream.CopyTo(fileStream);
-                    }
-                }
-
-                // Xóa file tạm nếu tồn tại
-                if (File.Exists(tempXlsxPath) && tempXlsxPath != templatePath)
-                    File.Delete(tempXlsxPath);
-
-                return savedPdfPath;
-            }
-            catch (Exception ex)
-            {
-                return savedExcelPath;
             }
         }
 

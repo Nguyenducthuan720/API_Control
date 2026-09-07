@@ -1,0 +1,117 @@
+<!doctype html>
+<html lang="vi">
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>{{OID}}</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            margin: 24px;
+            color: #222;
+        }
+
+        h1 {
+            margin-bottom: 4px;
+        }
+
+        .muted {
+            color: #666;
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-top: 16px;
+        }
+
+        th,
+        td {
+            border: 1px solid #333;
+            padding: 6px 8px;
+            text-align: left;
+        }
+
+        th {
+            background: #f1f1f1;
+        }
+
+        .number {
+            text-align: right;
+        }
+
+        .signature {
+            margin-top: 32px;
+            min-height: 120px;
+        }
+
+        .signature img {
+            display: block;
+            max-height: 80px;
+            max-width: 220px;
+            object-fit: contain;
+        }
+    </style>
+</head>
+<body>
+    <h1>{{CompanyName}}</h1>
+    <div class="muted">{{CompanyAddress}}</div>
+
+    <p><strong>Mã chứng từ:</strong> {{OID}}</p>
+    <p><strong>Khách hàng:</strong> {{CustomerName}}</p>
+    <p><strong>Loại đơn:</strong> {{OrderType}}</p>
+    <p><strong>Tuyến đường:</strong> {{RouteName}}</p>
+    <p><strong>Ngày in:</strong> {{PrintTime}}</p>
+
+    <table>
+        <thead>
+            <tr>
+                <th>STT</th>
+                <th>Loại hàng</th>
+                <th>Tuyến</th>
+                <th>Đơn vị</th>
+                <th class="number">Giá VAT</th>
+                <th class="number">Giá dầu</th>
+                <th>Nhà cung cấp</th>
+            </tr>
+        </thead>
+        <tbody>
+            {{#each Items}}
+            <tr>
+                <td>{{STT}}</td>
+                <td>{{GoodsTypeName}}</td>
+                <td>{{RouteName}}</td>
+                <td>{{UnitsName}}</td>
+                <td class="number">{{VATPrices}}</td>
+                <td class="number">{{OilPrices}}</td>
+                <td>{{ProvidersName}}</td>
+            </tr>
+            {{else}}
+            <tr>
+                <td colspan="7">Không có dữ liệu chi tiết.</td>
+            </tr>
+            {{/each}}
+        </tbody>
+    </table>
+
+    <p><strong>Ghi chú:</strong> {{Note}}</p>
+    <p><strong>Yêu cầu đặc biệt:</strong> {{SpecialRequirement}}</p>
+
+    <div class="signature">
+        {{#if Approval.SignatureUrl}}
+        <img src="{{Approval.SignatureUrl}}" alt="Chữ ký" />
+        {{/if}}
+        <div><strong>{{Approval.Name}}</strong></div>
+        <div class="muted">{{Approval.Note}}</div>
+    </div>
+
+    {{#if Attachments}}
+    <h3>File đính kèm</h3>
+    <ul>
+        {{#each Attachments}}
+        <li><a href="{{Url}}" target="_blank" rel="noopener">{{Name}}</a></li>
+        {{/each}}
+    </ul>
+    {{/if}}
+</body>
+</html>

@@ -4,8 +4,12 @@ using APISmartCity.Models;
 using APISmartCity.Models.Categorys;
 using APISmartCity.Services;
 using DMS.Lib.Files;
+using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.Extensions.Hosting;
+using System.Collections;
+using System.Text;
 using static APISmartCity.lib.Function;
 
 namespace DMS.Controllers.Functions.Configs
@@ -24,16 +28,28 @@ namespace DMS.Controllers.Functions.Configs
         private readonly ILogger<ExportPDFController> _logger;
         private readonly DBFolder _SettingOther;
         private readonly CompanyUpload _SettingUpload;
+        private readonly NLTShipping.Export.FileHTML _htmlExport;
+        private readonly IWebHostEnvironment _environment;
 
-        public ExportPDFController(UserInfo userInfo, WordToPdfService wordDocumentService, ExcelToPdfService excelToPdfService, ILogger<ExportPDFController> logger)
+        public ExportPDFController(
+            UserInfo userInfo,
+            WordToPdfService wordDocumentService,
+            ExcelToPdfService excelToPdfService,
+            ILogger<ExportPDFController> logger,
+            NLTShipping.Export.FileHTML htmlExport,
+            IWebHostEnvironment environment)
         {
             _UserInfo = userInfo;
             _wordToPdfService = wordDocumentService;
             _excelToPdfService = excelToPdfService;
             _logger = logger;
+            _htmlExport = htmlExport;
+            _environment = environment;
             _ConfigurationDB = Global.ListDB?.Find(item => item.DBType == "CON")?.DBString!;
             _SettingOther = Global.ListFolder?.Find(item => item.Type == "Print");
-            _SettingUpload = Global.CompanyUpload?.Find(item => item.ID == int.Parse(_UserInfo.CmpnID));
+            _SettingUpload = int.TryParse(_UserInfo.CmpnID, out var companyId)
+                ? Global.CompanyUpload?.Find(item => item.ID == companyId)
+                : null;
         }
 
         [HttpPost]
@@ -197,6 +213,63 @@ namespace DMS.Controllers.Functions.Configs
             {
                 return Ok(new DataResponse(ex.Message, "", "-1"));
             }
+        }
+
+        [HttpPost]
+        public async Task<IActionResult> ExportHTML(ExportPDF.Request.Get request)
+        {
+            return Ok(await _htmlExport.ExportAsync(request,
+                $"{Request.Scheme}://{Request.Host}{Request.PathBase}"));
+        }
+
+        [AllowAnonymous]
+        [HttpGet]
+        public IActionResult PreviewHTML([FromQuery] string path)
+        {
+            if (!_environment.IsDevelopment())
+                return NotFound();
+
+            if (string.IsNullOrWhiteSpace(path))
+                return BadRequest("Đường dẫn HTML không được để trống.");
+
+            var segments = path
+                .Replace('\\', '/')
+                .Split('/', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+
+            if (segments.Length < 5 ||
+                !int.TryParse(segments[0], out var companyId) ||
+                segments.Any(segment => segment is "." or ".." || segment.Contains(':')))
+            {
+                return BadRequest("Đường dẫn HTML không hợp lệ.");
+            }
+
+            var fileName = segments[^1];
+            if (!fileName.EndsWith(".html", StringComparison.OrdinalIgnoreCase) ||
+                !string.Equals(fileName, Path.GetFileName(fileName), StringComparison.Ordinal))
+            {
+                return BadRequest("Chỉ cho phép preview file HTML.");
+            }
+
+            var setting = Global.CompanyUpload?.Find(item => item.ID == companyId);
+            if (setting == null || string.IsNullOrWhiteSpace(setting.DiskFolderSave))
+                return NotFound();
+
+            var rootPath = _htmlExport.GetStorageRoot(setting);
+            var relativePath = string.Join(
+                Path.DirectorySeparatorChar,
+                segments);
+            var fullPath = Path.GetFullPath(Path.Combine(rootPath, relativePath));
+            var rootPrefix = rootPath.TrimEnd(
+                Path.DirectorySeparatorChar,
+                Path.AltDirectorySeparatorChar) + Path.DirectorySeparatorChar;
+
+            if (!fullPath.StartsWith(rootPrefix, StringComparison.OrdinalIgnoreCase))
+                return BadRequest("Đường dẫn HTML không hợp lệ.");
+
+            if (!System.IO.File.Exists(fullPath))
+                return NotFound();
+
+            return PhysicalFile(fullPath, "text/html; charset=utf-8");
         }
 
         [HttpPost]

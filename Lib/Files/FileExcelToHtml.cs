@@ -1,339 +1,637 @@
 using ClosedXML.Excel;
-using System.Collections.Generic;
-using System.Linq;
+using ClosedXML.Excel.Drawings;
+using System.Globalization;
+using System.Net;
 using System.Text;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 
 namespace DMS.Lib.Files
 {
     /// <summary>
-    /// Tool chuyen Excel (.xlsx) sang HTML dung Handlebars.Net.
-    /// - Doc file Excel giu nguyen layout (merge, style, width/height column/row).
-    /// - Chuyen cac placeholder dang @key trong cell thanh {{key}} cua Handlebars.
-    /// - Hoi tu JsonTableData (array) thanh cac bien {{table_<Type>}} de dung {{#each table_<Type>}}.
-    /// - Chay Handlebars voi data model BuildModel(JsonData, JsonTableData) => HTML cuoi cung.
+    /// Render trực tiếp form Excel thành HTML.
+    ///
+    /// Template Excel vẫn là nguồn layout: merge cell, kích thước hàng/cột,
+    /// border, font, màu nền và hình ảnh được chuyển sang HTML. Handlebars chỉ
+    /// thay dữ liệu trong các placeholder của template, không dựng lại một form
+    /// khác.
     /// </summary>
     public static class FileExcelToHtml
     {
-        /// <summary>
-        /// Chuyen template .xlsx -> chuoi HTML da render (Handlebars).
-        /// </summary>
+        private static readonly Regex PlaceholderRegex = new(
+            @"@([A-Za-z_][A-Za-z0-9_]*)",
+            RegexOptions.Compiled | RegexOptions.CultureInvariant);
+
         public static string ConvertToHtml(
             string templatePath,
             string jsonReplacements,
-            string tablejson,
+            string tableJson,
             string signType,
-            string userFullName)
+            string userFullName,
+            string signatureUrl = null)
         {
-            if (!System.IO.File.Exists(templatePath))
-                throw new System.IO.FileNotFoundException($"Khong tim thay file template: {templatePath}");
+            if (!File.Exists(templatePath))
+                throw new FileNotFoundException(
+                    $"Không tìm thấy file template Excel: {templatePath}",
+                    templatePath);
 
-            string htmlTemplate = BuildHtmlTemplateFromXlsx(templatePath);
-            string handlebarsTemplate = ToHandlebars(htmlTemplate);
+            var model = BuildModel(
+                jsonReplacements,
+                tableJson,
+                signType,
+                userFullName,
+                signatureUrl);
+            var handlebarsTemplate = BuildHtmlTemplateFromXlsx(templatePath, signType);
+            var rendered = HandlebarsDotNet.Handlebars.Compile(handlebarsTemplate)(model);
 
-            var data = BuildModel(jsonReplacements, tablejson, signType, userFullName);
-            var html = HandlebarsDotNet.Handlebars.Compile(handlebarsTemplate)(data);
-
-            return WrapDocument(html);
+            return WrapDocument(rendered);
         }
 
-        /// <summary>Tra ve HTML template (chua render) bang Handlebars, de debug/kiem tra.</summary>
+        /// <summary>
+        /// Chỉ dựng template Handlebars từ Excel để kiểm tra layout/placeholders.
+        /// </summary>
+        public static string ConvertWorkbookToHtml(string workbookPath)
+        {
+            var workbookHtml = BuildHtmlTemplateFromXlsx(workbookPath, null, true);
+            // Workbook values are already escaped; do not compile user data as template syntax.
+            var render = HandlebarsDotNet.Handlebars.Compile("{{{Workbook}}}");
+            return WrapDocument(render(new { Workbook = workbookHtml }));
+        }
+
         public static string BuildTemplate(string templatePath)
         {
-            string htmlTemplate = BuildHtmlTemplateFromXlsx(templatePath);
-            return ToHandlebars(htmlTemplate);
+            if (!File.Exists(templatePath))
+                throw new FileNotFoundException(
+                    $"Không tìm thấy file template Excel: {templatePath}",
+                    templatePath);
+
+            return BuildHtmlTemplateFromXlsx(templatePath, null);
         }
 
-        // ===================== 1. Excel -> HTML table =====================
-        private static string BuildHtmlTemplateFromXlsx(string templatePath)
+        private static string BuildHtmlTemplateFromXlsx(string templatePath, string signType, bool filled = false)
         {
-            var sb = new StringBuilder();
-            using var wb = new XLWorkbook(templatePath);
-            var ws = wb.Worksheets.First();
+            var document = new StringBuilder();
 
-            var usedRange = ws.RangeUsed();
-            if (usedRange == null) return "<table></table>";
-
-            int firstRow = usedRange.RangeAddress.FirstAddress.RowNumber;
-            int lastRow = usedRange.RangeAddress.LastAddress.RowNumber;
-            int firstCol = usedRange.RangeAddress.FirstAddress.ColumnNumber;
-            int lastCol = usedRange.RangeAddress.LastAddress.ColumnNumber;
-            int totalRows = lastRow - firstRow + 1;
-            int totalCols = lastCol - firstCol + 1;
-
-            // Xay dung ma tran merged range
-            var mergeMap = new Dictionary<int, HashSet<int>>();
-            foreach (var m in ws.MergedRanges)
+            using var workbook = new XLWorkbook(templatePath);
+            foreach (var worksheet in workbook.Worksheets)
             {
-                var a = m.RangeAddress;
-                int r1 = a.FirstAddress.RowNumber, r2 = a.LastAddress.RowNumber;
-                int c1 = a.FirstAddress.ColumnNumber, c2 = a.LastAddress.ColumnNumber;
-                if (r1 < r2 || c1 < c2)
-                {
-                    for (int r = r1; r <= r2; r++)
-                    {
-                        if (!mergeMap.ContainsKey(r)) mergeMap[r] = new HashSet<int>();
-                        for (int c = c1; c <= c2; c++)
-                        {
-                            if (r == r1 && c == c1) continue;
-                            mergeMap[r].Add(c);
-                        }
-                    }
-                }
+                // The workbook's print area is the source of truth for the form.
+                // RangeUsed() can include styled cells outside the printable form
+                // (this workbook declares A1:N20 but has a styled P column).
+                var usedRange = worksheet.PageSetup.PrintAreas.FirstOrDefault()
+                    ?? worksheet.RangeUsed();
+                if (usedRange == null)
+                    continue;
+
+                document.Append("<section class=\"excel-sheet\">");
+                document.Append(BuildWorksheetTable(worksheet, usedRange, signType, filled));
+                document.Append(BuildWorksheetPictures(worksheet, usedRange));
+                document.Append("</section>");
             }
 
-            // Colgroup widths
-            sb.Append("<table class=\"excel-table\" style=\"border-collapse:collapse;width:100%;\">");
-            sb.Append("<colgroup>");
-            for (int c = firstCol; c <= lastCol; c++)
-            {
-                double w = ws.Column(c).Width;
-                sb.Append($"<col style=\"width:{WidthToPx(w)}px;\">");
-            }
-            sb.Append("</colgroup>");
+            return document.Length == 0
+                ? "<section class=\"excel-sheet\"><table class=\"excel-table\"></table></section>"
+                : document.ToString();
+        }
 
-            for (int r = firstRow; r <= lastRow; r++)
+        private static string BuildWorksheetTable(
+            IXLWorksheet worksheet,
+            IXLRange usedRange,
+            string signType, bool filled)
+        {
+            var firstRow = usedRange.RangeAddress.FirstAddress.RowNumber;
+            var lastRow = usedRange.RangeAddress.LastAddress.RowNumber;
+            var firstColumn = usedRange.RangeAddress.FirstAddress.ColumnNumber;
+            var lastColumn = usedRange.RangeAddress.LastAddress.ColumnNumber;
+            var mergedCells = BuildMergedCellMap(worksheet);
+            var tableRows = filled ? new Dictionary<int, string>() : FindTableRows(usedRange);
+            var checkRows = filled ? new HashSet<int>() : FindCheckRows(usedRange);
+
+            var html = new StringBuilder();
+            var tableWidth = Enumerable.Range(firstColumn, lastColumn - firstColumn + 1)
+                .Sum(column => Math.Max(1, WidthToPixels(worksheet.Column(column).Width)));
+            html.Append($"<table class=\"excel-table\" style=\"width:{tableWidth.ToString(CultureInfo.InvariantCulture)}px\"><colgroup>");
+            for (var column = firstColumn; column <= lastColumn; column++)
             {
-                double rowH = ws.Row(r).Height;
-                sb.Append($"<tr style=\"height:{RowHeightToPx(rowH)}px;\">");
-                for (int c = firstCol; c <= lastCol; c++)
+                var width = Math.Max(1, WidthToPixels(worksheet.Column(column).Width));
+                html.Append($"<col style=\"width:{width.ToString(CultureInfo.InvariantCulture)}px\">");
+            }
+
+            html.Append("</colgroup><tbody>");
+            for (var row = firstRow; row <= lastRow; row++)
+            {
+                if (checkRows.Contains(row) || tableRows.ContainsKey(row))
+                    continue;
+
+                tableRows.TryGetValue(row - 1, out var tableType);
+                if (tableType != null)
+                    html.Append($"{{{{#each table_{tableType}}}}}");
+
+                html.Append($"<tr style=\"height:{RowHeightToPixels(worksheet.Row(row).Height).ToString(CultureInfo.InvariantCulture)}px\">");
+                for (var column = firstColumn; column <= lastColumn; column++)
                 {
-                    if (mergeMap.ContainsKey(r) && mergeMap[r].Contains(c))
+                    if (mergedCells.ContainsKey((row, column)))
                         continue;
 
-                    var cell = ws.Cell(r, c);
-                    int rowspan = 1, colspan = 1;
-                    foreach (var m in ws.MergedRanges)
-                    {
-                        var a = m.RangeAddress;
-                        if (a.FirstAddress.RowNumber == r && a.FirstAddress.ColumnNumber == c)
-                        {
-                            rowspan = a.LastAddress.RowNumber - r + 1;
-                            colspan = a.LastAddress.ColumnNumber - c + 1;
-                            break;
-                        }
-                    }
+                    var cell = worksheet.Cell(row, column);
+                    var (rowSpan, columnSpan) = GetSpan(
+                        worksheet,
+                        row,
+                        column,
+                        lastRow,
+                        lastColumn);
+                    var span = rowSpan > 1 ? $" rowspan=\"{rowSpan}\"" : string.Empty;
+                    span += columnSpan > 1 ? $" colspan=\"{columnSpan}\"" : string.Empty;
+                    var content = filled
+                        ? RenderFilledCell(cell)
+                        : BuildCellContent(cell, tableType, signType);
+                    var style = BuildCellStyle(cell);
 
-                    string style = BuildCellStyle(cell);
-                    string content = CellContent(cell);
-                    string span = (rowspan > 1 ? $" rowspan=\"{rowspan}\"" : "") +
-                                  (colspan > 1 ? $" colspan=\"{colspan}\"" : "");
-                    sb.Append($"<td{span} style=\"{style}\">{content}</td>");
+                    html.Append($"<td{span} style=\"{style}\">{content}</td>");
                 }
-                sb.Append("</tr>");
+
+                html.Append("</tr>");
+                if (tableType != null)
+                    html.Append("{{/each}}");
             }
-            sb.Append("</table>");
-            return sb.ToString();
+
+            html.Append("</tbody></table>");
+            return html.ToString();
         }
 
-        private static string CellContent(IXLCell cell)
+        private static string RenderFilledCell(IXLCell cell)
         {
-            if (cell.HasFormula)
+            var value = cell.GetFormattedString();
+            // Filled content is data, including literal @ text and unresolved placeholders.
+            return WebUtility.HtmlEncode(value).Replace("\r\n", "\n").Replace("\n", "<br>");
+        }
+
+        private static Dictionary<(int Row, int Column), bool> BuildMergedCellMap(IXLWorksheet worksheet)
+        {
+            var map = new Dictionary<(int Row, int Column), bool>();
+            foreach (var mergedRange in worksheet.MergedRanges)
             {
-                try
+                var address = mergedRange.RangeAddress;
+                for (var row = address.FirstAddress.RowNumber; row <= address.LastAddress.RowNumber; row++)
                 {
-                    string f = cell.GetFormattedString();
-                    if (!string.IsNullOrWhiteSpace(f)) return Escape(f);
+                    for (var column = address.FirstAddress.ColumnNumber;
+                         column <= address.LastAddress.ColumnNumber;
+                         column++)
+                    {
+                        if (row == address.FirstAddress.RowNumber &&
+                            column == address.FirstAddress.ColumnNumber)
+                        {
+                            continue;
+                        }
+
+                        map[(row, column)] = true;
+                    }
                 }
-                catch { }
             }
-            var v = cell.Value;
-            if (v.IsBlank) return "&nbsp;";
-            string text = cell.GetFormattedString();
-            return Escape(string.IsNullOrEmpty(text) ? "&nbsp;" : text.Replace("\n", "<br>"));
+
+            return map;
         }
 
-        private static string Escape(string s)
+        private static Dictionary<int, string> FindTableRows(IXLRange usedRange)
         {
-            if (string.IsNullOrEmpty(s)) return "&nbsp;";
-            return s.Replace("&", "&amp;").Replace("<", "&lt;").Replace(">", "&gt;");
+            var tableRows = new Dictionary<int, string>();
+            foreach (var cell in usedRange.Cells())
+            {
+                var value = cell.GetString().Trim();
+                if (!value.StartsWith("@table_", StringComparison.OrdinalIgnoreCase))
+                    continue;
+
+                var tableType = value[7..].Trim();
+                if (tableType.Length > 0)
+                    tableRows[cell.Address.RowNumber] = tableType;
+            }
+
+            return tableRows;
+        }
+
+        private static HashSet<int> FindCheckRows(IXLRange usedRange)
+        {
+            var rows = new HashSet<int>();
+            foreach (var cell in usedRange.Cells())
+            {
+                if (cell.GetString().Trim().StartsWith("@check_C_", StringComparison.OrdinalIgnoreCase))
+                    rows.Add(cell.Address.RowNumber);
+            }
+
+            return rows;
+        }
+
+        private static (int RowSpan, int ColumnSpan) GetSpan(
+            IXLWorksheet worksheet,
+            int row,
+            int column,
+            int lastRow,
+            int lastColumn)
+        {
+            foreach (var mergedRange in worksheet.MergedRanges)
+            {
+                var address = mergedRange.RangeAddress;
+                if (address.FirstAddress.RowNumber != row ||
+                    address.FirstAddress.ColumnNumber != column)
+                {
+                    continue;
+                }
+
+                return (
+                    Math.Min(address.LastAddress.RowNumber, lastRow) - row + 1,
+                    Math.Min(address.LastAddress.ColumnNumber, lastColumn) - column + 1);
+            }
+
+            return (1, 1);
+        }
+
+        private static string BuildCellContent(
+            IXLCell cell,
+            string tableType,
+            string signType)
+        {
+            var value = cell.HasFormula
+                ? GetFormulaValue(cell)
+                : cell.GetFormattedString();
+
+            if (string.IsNullOrWhiteSpace(value))
+                return "&nbsp;";
+
+            var encodedValue = WebUtility.HtmlEncode(value)
+                .Replace("\r\n", "\n", StringComparison.Ordinal)
+                .Replace("\r", "\n", StringComparison.Ordinal)
+                .Replace("\n", "<br>", StringComparison.Ordinal);
+
+            return PlaceholderRegex.Replace(
+                encodedValue,
+                match => ReplacePlaceholder(match.Groups[1].Value, tableType, signType));
+        }
+
+        private static string GetFormulaValue(IXLCell cell)
+        {
+            try
+            {
+                return cell.GetFormattedString();
+            }
+            catch
+            {
+                return cell.GetString();
+            }
+        }
+
+        private static string ReplacePlaceholder(
+            string key,
+            string tableType,
+            string signType)
+        {
+            if (key.StartsWith("SignLink", StringComparison.OrdinalIgnoreCase))
+            {
+                return "{{#if " + key + "}}<img class=\"excel-signature\" src=\"{{" + key + "}}\" alt=\"Chữ ký\">{{/if}}";
+            }
+
+            if (key.StartsWith("SignName", StringComparison.OrdinalIgnoreCase))
+            {
+                return string.Equals(signType, "DF", StringComparison.OrdinalIgnoreCase)
+                    ? string.Empty
+                    : "{{" + key + "}}";
+            }
+
+            if (key.StartsWith("table_", StringComparison.OrdinalIgnoreCase))
+                return string.Empty;
+
+            if (!string.IsNullOrWhiteSpace(tableType) &&
+                key.StartsWith(tableType + "_", StringComparison.OrdinalIgnoreCase))
+            {
+                return "{{" + key[(tableType.Length + 1)..] + "}}";
+            }
+
+            return "{{" + key + "}}";
+        }
+
+        private static string BuildWorksheetPictures(
+            IXLWorksheet worksheet,
+            IXLRange usedRange)
+        {
+            var firstRow = usedRange.RangeAddress.FirstAddress.RowNumber;
+            var firstColumn = usedRange.RangeAddress.FirstAddress.ColumnNumber;
+            var pictures = new StringBuilder();
+
+            foreach (var picture in worksheet.Pictures)
+            {
+                var topLeftCell = picture.TopLeftCell;
+                if (topLeftCell == null)
+                    continue;
+
+                var imageData = ReadPictureData(picture);
+                if (imageData == null)
+                    continue;
+
+                var left = (double)picture.Left;
+                for (var column = firstColumn; column < topLeftCell.Address.ColumnNumber; column++)
+                    left += WidthToPixels(worksheet.Column(column).Width);
+
+                var top = (double)picture.Top;
+                for (var row = firstRow; row < topLeftCell.Address.RowNumber; row++)
+                    top += RowHeightToPixels(worksheet.Row(row).Height);
+
+                var width = Math.Max(1d, picture.Width);
+                var height = Math.Max(1d, picture.Height);
+                var leftText = left.ToString("0.##", CultureInfo.InvariantCulture);
+                var topText = top.ToString("0.##", CultureInfo.InvariantCulture);
+                var widthText = width.ToString("0.##", CultureInfo.InvariantCulture);
+                var heightText = height.ToString("0.##", CultureInfo.InvariantCulture);
+
+                pictures.Append(
+                    $"<img class=\"excel-picture\" src=\"data:{imageData.Value.MimeType};base64,{imageData.Value.Base64}\" " +
+                    $"alt=\"Excel image\" style=\"left:{leftText}px;top:{topText}px;width:{widthText}px;height:{heightText}px\">");
+            }
+
+            return pictures.ToString();
+        }
+
+        private static (string MimeType, string Base64)? ReadPictureData(IXLPicture picture)
+        {
+            try
+            {
+                var stream = picture.ImageStream;
+                if (stream == null)
+                    return null;
+
+                if (stream.CanSeek)
+                    stream.Position = 0;
+
+                using var buffer = new MemoryStream();
+                stream.CopyTo(buffer);
+                if (buffer.Length == 0)
+                    return null;
+
+                var mimeType = picture.Format.ToString().ToLowerInvariant() switch
+                {
+                    "jpg" or "jpeg" => "image/jpeg",
+                    "gif" => "image/gif",
+                    "bmp" => "image/bmp",
+                    "tif" or "tiff" => "image/tiff",
+                    "svg" => "image/svg+xml",
+                    _ => "image/png"
+                };
+
+                return (mimeType, Convert.ToBase64String(buffer.ToArray()));
+            }
+            catch
+            {
+                return null;
+            }
         }
 
         private static string BuildCellStyle(IXLCell cell)
         {
+            var style = cell.Style;
             var parts = new List<string>();
-            var s = cell.Style;
 
-            if (s.Font.Bold) parts.Add("font-weight:bold;");
-            if (s.Font.Italic) parts.Add("font-style:italic;");
-            if (s.Font.FontSize > 0) parts.Add($"font-size:{s.Font.FontSize.ToString(System.Globalization.CultureInfo.InvariantCulture)}pt;");
-            if (!string.IsNullOrEmpty(s.Font.FontName)) parts.Add($"font-family:'{s.Font.FontName}';");
-
-            var fColor = s.Font.FontColor;
-            if (fColor != null && !fColor.HasIndexedColor || (fColor.HasIndexedColor && fColor.Indexed != 0))
+            if (style.Font.Bold)
+                parts.Add("font-weight:bold;");
+            if (style.Font.Italic)
+                parts.Add("font-style:italic;");
+            if (style.Font.FontSize > 0)
             {
-                string hex = TryColorHex(fColor);
-                if (hex != null) parts.Add($"color:{hex};");
+                parts.Add($"font-size:{style.Font.FontSize.ToString(CultureInfo.InvariantCulture)}pt;");
+            }
+            if (!string.IsNullOrWhiteSpace(style.Font.FontName))
+                parts.Add($"font-family:'{WebUtility.HtmlEncode(style.Font.FontName)}';");
+
+            var fontColor = TryColorHex(style.Font.FontColor);
+            if (fontColor != null)
+                parts.Add($"color:{fontColor};");
+
+            var backgroundColor = TryColorHex(style.Fill.BackgroundColor);
+            if (backgroundColor != null)
+                parts.Add($"background-color:{backgroundColor};");
+
+            switch (style.Alignment.Horizontal)
+            {
+                case XLAlignmentHorizontalValues.Left:
+                    parts.Add("text-align:left;");
+                    break;
+                case XLAlignmentHorizontalValues.Center:
+                    parts.Add("text-align:center;");
+                    break;
+                case XLAlignmentHorizontalValues.Right:
+                    parts.Add("text-align:right;");
+                    break;
+                case XLAlignmentHorizontalValues.Justify:
+                    parts.Add("text-align:justify;");
+                    break;
             }
 
-            var bg = s.Fill.BackgroundColor;
-            string bgHex = TryColorHex(bg, true);
-            if (bgHex != null) parts.Add($"background-color:{bgHex};");
-
-            switch (s.Alignment.Horizontal)
+            switch (style.Alignment.Vertical)
             {
-                case XLAlignmentHorizontalValues.Left: parts.Add("text-align:left;"); break;
-                case XLAlignmentHorizontalValues.Center: parts.Add("text-align:center;"); break;
-                case XLAlignmentHorizontalValues.Right: parts.Add("text-align:right;"); break;
-                case XLAlignmentHorizontalValues.Justify: parts.Add("text-align:justify;"); break;
+                case XLAlignmentVerticalValues.Top:
+                    parts.Add("vertical-align:top;");
+                    break;
+                case XLAlignmentVerticalValues.Center:
+                    parts.Add("vertical-align:middle;");
+                    break;
+                case XLAlignmentVerticalValues.Bottom:
+                    parts.Add("vertical-align:bottom;");
+                    break;
             }
-            switch (s.Alignment.Vertical)
-            {
-                case XLAlignmentVerticalValues.Top: parts.Add("vertical-align:top;"); break;
-                case XLAlignmentVerticalValues.Center: parts.Add("vertical-align:middle;"); break;
-                case XLAlignmentVerticalValues.Bottom: parts.Add("vertical-align:bottom;"); break;
-            }
-            if (s.Alignment.WrapText) parts.Add("white-space:pre-wrap;word-wrap:break-word;");
 
-            string border = BuildBorder(s);
-            if (!string.IsNullOrEmpty(border)) parts.Add(border);
+            if (style.Alignment.WrapText)
+                parts.Add("white-space:pre-wrap;word-wrap:break-word;");
 
-            return string.Join("", parts);
+            AddBorder(parts, style.Border.TopBorder, style.Border.TopBorderColor, "top");
+            AddBorder(parts, style.Border.BottomBorder, style.Border.BottomBorderColor, "bottom");
+            AddBorder(parts, style.Border.LeftBorder, style.Border.LeftBorderColor, "left");
+            AddBorder(parts, style.Border.RightBorder, style.Border.RightBorderColor, "right");
+
+            return string.Join(string.Empty, parts);
         }
 
-        private static string BuildBorder(IXLStyle s)
+        private static void AddBorder(
+            ICollection<string> styles,
+            XLBorderStyleValues border,
+            XLColor color,
+            string edge)
         {
-            var bs = new StringBuilder();
-            AddBorderEdge(bs, s.Border.TopBorder, "top");
-            AddBorderEdge(bs, s.Border.BottomBorder, "bottom");
-            AddBorderEdge(bs, s.Border.LeftBorder, "left");
-            AddBorderEdge(bs, s.Border.RightBorder, "right");
-            return bs.ToString();
-        }
-
-        private static void AddBorderEdge(StringBuilder bs, XLBorderValues b, string edge)
-        {
-            string style = b switch
+            var borderStyle = border switch
             {
-                XLBorderValues.Thin => "1px solid",
-                XLBorderValues.Medium => "2px solid",
-                XLBorderValues.Thick => "3px solid",
-                XLBorderValues.Double => "3px double",
-                XLBorderValues.Dashed => "1px dashed",
-                XLBorderValues.Dotted => "1px dotted",
-                XLBorderValues.Hair => "1px solid",
+                XLBorderStyleValues.Thin => "1px solid",
+                XLBorderStyleValues.Medium => "2px solid",
+                XLBorderStyleValues.Thick => "3px solid",
+                XLBorderStyleValues.Double => "3px double",
+                XLBorderStyleValues.Dashed => "1px dashed",
+                XLBorderStyleValues.Dotted => "1px dotted",
+                XLBorderStyleValues.Hair => "1px solid",
                 _ => null
             };
-            if (style == null) return;
-            string hex = TryColorHex(b.Color) ?? "#000000";
-            bs.Append($"border-{edge}:{style} {hex};");
+
+            if (borderStyle == null)
+                return;
+
+            styles.Add(
+                $"border-{edge}:{borderStyle} {TryColorHex(color) ?? "#000000"};");
         }
 
-        private static string TryColorHex(XLColor c, bool isBackground = false)
+        private static string TryColorHex(XLColor color)
         {
             try
             {
-                if (c.HasColor) return "#" + c.Color.ToHex();
-                if (c.HasIndexedColor)
-                {
-                    if (isBackground && c.Indexed == 64) return null; // transparent
-                    // ClosedXML khong cung cap bang mau indexed -> bo qua
+                if (color == null || !color.HasValue || color.ColorType != XLColorType.Color)
                     return null;
-                }
-                if (!string.IsNullOrEmpty(c.ColorHex)) return "#" + c.ColorHex;
+
+                return $"#{color.Color.R:X2}{color.Color.G:X2}{color.Color.B:X2}";
             }
-            catch { }
-            return null;
+            catch
+            {
+                return null;
+            }
         }
 
-        private static double WidthToPx(double width) => Math.Truncate((width + 0.72) * 7.0025);
-        private static double RowHeightToPx(double height) => Math.Truncate(height * (4.0 / 3.0));
-
-        // ===================== 2. @key -> {{key}} =====================
-        private static string ToHandlebars(string html)
+        private static double WidthToPixels(double width)
         {
-            // @SignLink_*, @SignName_*, @SignNote_* giu nguyen (khong chuyen {}) vi xu ly rieng
-            var result = System.Text.RegularExpressions.Regex.Replace(
-                html,
-                @"@([A-Za-z_][A-Za-z0-9_]*)",
-                m => m.Value.StartsWith("@Sign") || m.Value.StartsWith("@table") || m.Value.StartsWith("@check")
-                    ? m.Value
-                    : "{{" + m.Value.Substring(1).Trim() + "}}");
-            return result;
+            return Math.Truncate((width + 0.72) * 7.0025);
         }
 
-        // ===================== 3. Build du lieu cho Handlebars =====================
+        private static double RowHeightToPixels(double height)
+        {
+            return Math.Truncate(height * (4.0 / 3.0));
+        }
+
         private static Dictionary<string, object> BuildModel(
-            string jsonReplacements,
-            string tablejson,
+            string jsonData,
+            string tableJson,
             string signType,
-            string userFullName)
+            string userFullName,
+            string signatureUrl)
         {
-            var model = new Dictionary<string, object>(System.StringComparer.OrdinalIgnoreCase);
+            var model = new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase);
 
-            // JsonData: object root, cac key co dau @ -> bo dau @
-            if (!string.IsNullOrWhiteSpace(jsonReplacements))
+            if (!string.IsNullOrWhiteSpace(jsonData))
             {
-                var doc = JsonDocument.Parse(jsonReplacements);
-                if (doc.RootElement.ValueKind == JsonValueKind.Object)
+                using var document = JsonDocument.Parse(jsonData);
+                if (document.RootElement.ValueKind == JsonValueKind.Object)
                 {
-                    foreach (var p in doc.RootElement.EnumerateObject())
+                    foreach (var property in document.RootElement.EnumerateObject())
                     {
-                        string key = p.Name;
-                        if (key.StartsWith("@")) key = key.Substring(1);
-                        model[key] = ReadValue(p.Value);
+                        var key = NormalizeKey(property.Name);
+                        model[key] = ReadValue(property.Value);
                     }
                 }
-                // userFullName/phan chu ky mac dinh
-                if (!model.ContainsKey("UserFullName") && !string.IsNullOrEmpty(userFullName))
-                    model["UserFullName"] = userFullName;
             }
 
-            // JsonTableData: array -> model["table_<Type>"] = list<dict>
-            if (!string.IsNullOrWhiteSpace(tablejson) && tablejson.Trim() != "[]")
+            foreach (var key in model.Keys
+                         .Where(key => key.StartsWith("SignLink", StringComparison.OrdinalIgnoreCase))
+                         .ToList())
             {
-                var doc = JsonDocument.Parse(tablejson);
-                if (doc.RootElement.ValueKind == JsonValueKind.Array)
-                {
-                    var rows = new List<Dictionary<string, object>>();
-                    foreach (var item in doc.RootElement.EnumerateArray())
-                    {
-                        var row = new Dictionary<string, object>(System.StringComparer.OrdinalIgnoreCase);
-                        if (item.ValueKind == JsonValueKind.Object)
-                        {
-                            foreach (var p in item.EnumerateObject())
-                            {
-                                string key = p.Name;
-                                if (key.StartsWith("@")) key = key.Substring(1);
-                                if (key.StartsWith("I_")) key = key.Substring(2);
-                                row[key] = ReadValue(p.Value);
-                            }
-                        }
-                        rows.Add(row);
-                    }
-                    // Type mac dinh "I" (tu ExecExportPDF_ShippingAndCreditnPL)
-                    model["table_I"] = rows;
-                }
+                model[key] = signatureUrl ?? string.Empty;
             }
+
+            model["SignatureUrl"] = signatureUrl ?? string.Empty;
+            model["SignType"] = signType ?? string.Empty;
+            model["UserFullName"] = string.IsNullOrWhiteSpace(userFullName)
+                ? GetString(model, "UserFullName") ?? string.Empty
+                : userFullName;
+
+            foreach (var group in ParseTableRows(tableJson).GroupBy(row => row.TableType))
+                model["table_" + group.Key] = group.Select(row => row.Values).ToList();
 
             return model;
         }
 
-        private static object ReadValue(JsonElement el)
+        private static List<(string TableType, Dictionary<string, object> Values)> ParseTableRows(string tableJson)
         {
-            switch (el.ValueKind)
+            var result = new List<(string TableType, Dictionary<string, object> Values)>();
+            if (string.IsNullOrWhiteSpace(tableJson) || tableJson.Trim() == "[]")
+                return result;
+
+            using var document = JsonDocument.Parse(tableJson);
+            var elements = document.RootElement.ValueKind == JsonValueKind.Array
+                ? document.RootElement.EnumerateArray().ToList()
+                : new List<JsonElement> { document.RootElement };
+
+            foreach (var element in elements)
             {
-                case JsonValueKind.String: return el.GetString();
-                case JsonValueKind.Number: return el.TryGetInt64(out long l) ? (object)l : el.GetDouble();
-                case JsonValueKind.True: return true;
-                case JsonValueKind.False: return false;
-                case JsonValueKind.Null: return null;
-                case JsonValueKind.Object:
-                    var d = new Dictionary<string, object>(System.StringComparer.OrdinalIgnoreCase);
-                    foreach (var p in el.EnumerateObject()) d[p.Name] = ReadValue(p.Value);
-                    return d;
-                case JsonValueKind.Array:
-                    return el.EnumerateArray().Select(ReadValue).ToList();
-                default: return el.ToString();
+                if (element.ValueKind != JsonValueKind.Object)
+                    continue;
+
+                var values = new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase);
+                var tableType = "I";
+                foreach (var property in element.EnumerateObject())
+                {
+                    var key = NormalizeKey(property.Name);
+                    var separator = key.IndexOf('_');
+                    if (separator > 0)
+                    {
+                        tableType = key[..separator];
+                        key = key[(separator + 1)..];
+                    }
+
+                    values[key] = ReadValue(property.Value);
+                }
+
+                result.Add((tableType, values));
             }
+
+            return result;
         }
 
-        // ===================== 4. Wrap document =====================
+        private static string NormalizeKey(string key)
+        {
+            return key.StartsWith("@", StringComparison.Ordinal)
+                ? key[1..]
+                : key;
+        }
+
+        private static object ReadValue(JsonElement element)
+        {
+            return element.ValueKind switch
+            {
+                JsonValueKind.String => element.GetString(),
+                JsonValueKind.Number when element.TryGetInt64(out var integer) => integer,
+                JsonValueKind.Number => element.GetDecimal(),
+                JsonValueKind.True => true,
+                JsonValueKind.False => false,
+                JsonValueKind.Object => ReadObject(element),
+                JsonValueKind.Array => element.EnumerateArray().Select(ReadValue).ToList(),
+                _ => null
+            };
+        }
+
+        private static Dictionary<string, object> ReadObject(JsonElement element)
+        {
+            var result = new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase);
+            foreach (var property in element.EnumerateObject())
+                result[NormalizeKey(property.Name)] = ReadValue(property.Value);
+
+            return result;
+        }
+
+        private static string GetString(Dictionary<string, object> values, string key)
+        {
+            return values.TryGetValue(key, out var value)
+                ? Convert.ToString(value, CultureInfo.InvariantCulture)
+                : null;
+        }
+
         private static string WrapDocument(string body)
         {
             return "<!DOCTYPE html><html lang=\"vi\"><head><meta charset=\"utf-8\">" +
-                   "<style>body{font-family:Arial,sans-serif;margin:20px;} .excel-table td{border:1px solid #000;padding:4px;}</style>" +
-                   "</head><body>" + body + "</body></html>";
+                   "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">" +
+                   "<style>" +
+                   "html,body{margin:0;padding:0;background:#f3f4f6;}" +
+                   "body{font-family:Arial,sans-serif;color:#000;}" +
+                   ".excel-document{padding:16px;box-sizing:border-box;width:100%;overflow-x:auto;}" +
+                   ".excel-sheet{position:relative;width:max-content;max-width:none;margin:0 auto 24px;background:#fff;overflow:visible;page-break-after:always;}" +
+                   ".excel-sheet:last-child{page-break-after:auto;}" +
+                   ".excel-table{border-collapse:collapse;table-layout:fixed;width:auto;background:#fff;}" +
+                   ".excel-table td{box-sizing:border-box;padding:2px 4px;overflow:hidden;}" +
+                   ".excel-picture,.excel-signature{position:absolute;display:block;object-fit:contain;}" +
+                   ".excel-picture{z-index:10;pointer-events:none;}" +
+                   ".excel-signature{position:relative;display:inline-block;max-width:100%;max-height:100%;vertical-align:middle;}" +
+                   "@media print{html,body{background:#fff}.excel-document{padding:0}.excel-sheet{margin:0;}}" +
+                   "</style></head><body><main class=\"excel-document\">" +
+                   body +
+                   "</main></body></html>";
         }
     }
 }
