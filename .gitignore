@@ -364,3 +364,8 @@ FodyWeavers.xsd
 /APISmartCity/Controllers/Ver2/Guests/Config
 /Controllers/Authentications/UserDomainController.cs
 /OsControl.csproj
+!/OsControl.csproj
+docs/
+
+# Generated local DMS files; keep Configuration templates trackable
+/D:/IIS/TMS/File/DMS/*/SALE_SHIPPINGPRICE/

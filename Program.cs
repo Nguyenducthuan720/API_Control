@@ -14,12 +14,14 @@ using DMS.Controllers.Sockets;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.AspNetCore.Http.Features;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.Server.Kestrel.Core;
 using Microsoft.IdentityModel.Tokens;
 using WkHtmlToPdfDotNet;
 using WkHtmlToPdfDotNet.Contracts;
 using StaticService;
 using System.Text;
 using System.Globalization;
+using DMS.Lib.Files;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -50,7 +52,7 @@ Global.DCServer = builder.Configuration["UserDomain:DCServer"];
 Global.IsUserDomain = builder.Configuration["UserDomain:IsUserDomain"];
 
 builder.Services.Configure<ApiBehaviorOptions>(options => options.SuppressModelStateInvalidFilter = false);
-builder.Services.Configure<IISServerOptions>(options => options.MaxRequestBodySize = int.MaxValue);
+builder.Services.Configure<KestrelServerOptions>(options => options.Limits.MaxRequestBodySize = int.MaxValue);
 builder.Services.Configure<FormOptions>(x =>
 {
     x.ValueLengthLimit = int.MaxValue;
@@ -90,6 +92,8 @@ builder.Services.AddScoped<APIInfo>();
 builder.Services.AddScoped<ISAPIService>();
 builder.Services.AddScoped<WordToPdfService>();
 builder.Services.AddScoped<ExcelToPdfService>();
+builder.Services.AddSingleton<HandlebarsHtmlRenderer>();
+builder.Services.AddScoped<NLTShipping.Export.FileHTML>();
 builder.Services.AddSingleton<GoogleTranslateService>();
 builder.Services.AddSingleton<VietmapGeocodeService>();
 builder.Services.AddSingleton<TransferService>();

@@ -123,6 +123,7 @@ namespace OsControl.Controllers.Authentications
                 ".pdf" => "application/pdf",
                 ".jpg" or ".jpeg" => "image/jpeg",
                 ".png" => "image/png",
+                ".html" or ".htm" => "text/html; charset=utf-8",
                 ".xlsx" => "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 ".docx" => "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
                 _ => "application/octet-stream"
