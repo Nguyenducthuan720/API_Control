@@ -24,9 +24,135 @@ namespace DMS.Lib.Files
             string userFullName,
             ExcelToPdfService excelToPdfService)
         {
-            var savedExcelPath = ExportTemplateToExcel(templatePath, outputFolder, outputFileName,
-                jsonReplacements, signType, tablejson, userFullName);
+            if (!File.Exists(templatePath))
+                throw new FileNotFoundException($"Không tìm thấy file template: {templatePath}");
+
+            if (!Directory.Exists(outputFolder))
+                Directory.CreateDirectory(outputFolder);
+
+            string fileExtension = Path.GetExtension(templatePath)?.ToLower();
+            string tempXlsxPath = Path.Combine(outputFolder, $"{outputFileName}_temp.xlsx");
+            string savedExcelPath = Path.Combine(outputFolder, $"{outputFileName}.xlsx");
             var savedPdfPath = Path.Combine(outputFolder, $"{outputFileName}.pdf");
+            string savedPngPath = Path.Combine(outputFolder, $"{outputFileName}.png");
+
+            var replacements = JsonSerializer.Deserialize<Dictionary<string, object>>(jsonReplacements)
+                   ?? new Dictionary<string, object>();
+            File.Copy(templatePath, tempXlsxPath, true);
+            try { File.Delete(tempXlsxPath + ":Zone.Identifier"); } catch { }
+
+            RewriteExcelByOpenXml(tempXlsxPath);
+            using (var fs = new FileStream(tempXlsxPath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
+            using (var wb = new XLWorkbook(tempXlsxPath))
+            {
+                foreach (var ws in wb.Worksheets)
+                {
+                    foreach (var kv in replacements)
+                    {
+                        string key = kv.Key;
+                        string val = kv.Value?.ToString()?.Trim() ?? "";
+
+                        if (key.StartsWith("@SignLink_", StringComparison.OrdinalIgnoreCase))
+                        {
+                            string imgPath = val;
+                            string ext = Path.GetExtension(val)?.ToLower();
+
+                            if (ext == ".svg")
+                            {
+                                var replacementsSvg = new Dictionary<string, string>
+                                {
+                                    ["@UserName"] = userFullName,
+                                    ["@NgayKy"] = DateTime.Now.ToString("HH:mm:ss dd/MM/yyyy")
+                                };
+                                FileSVG.ReplaceAndConvertSvgToPng(val, savedPngPath, replacementsSvg, 600, 200);
+                                imgPath = savedPngPath;
+                            }
+
+                            if (!File.Exists(imgPath))
+                                continue;
+
+                            var matchedCells = ws.CellsUsed(c =>
+                                !c.HasFormula &&
+                                !c.Value.IsBlank &&
+                                c.Value.ToString().Contains(key, StringComparison.OrdinalIgnoreCase))
+                                .ToList();
+
+                            foreach (var cell in matchedCells)
+                            {
+                                cell.Value = "";
+                                var range = cell.MergedRange() ?? cell.AsRange();
+                                double cellWidthPx = GetRangeWidthInPixels(ws, range);
+                                double cellHeightPx = GetRangeHeightInPixels(ws, range);
+
+                                using (var img = Image.Load(imgPath))
+                                using (var ms = new MemoryStream())
+                                {
+                                    double scale = Math.Min(cellWidthPx / img.Width, cellHeightPx / img.Height) * 0.9;
+                                    int newWidth = Math.Max(1, (int)(img.Width * scale));
+                                    int newHeight = Math.Max(1, (int)(img.Height * scale));
+                                    img.Mutate(x => x.Resize(newWidth, newHeight));
+                                    img.SaveAsPng(ms);
+                                    ms.Seek(0, SeekOrigin.Begin);
+
+                                    var picName = Guid.NewGuid().ToString("N").Substring(0, 30);
+                                    var picture = ws.AddPicture(ms, XLPictureFormat.Png, picName);
+                                    var topLeft = range.FirstCell();
+                                    int offsetX = Math.Max(0, (int)((cellWidthPx - newWidth) / 2));
+                                    int offsetY = Math.Max(0, (int)((cellHeightPx - newHeight) / 2));
+                                    picture.MoveTo(topLeft, offsetX, offsetY);
+                                }
+                            }
+                        }
+                        else
+                        {
+                            if (key.StartsWith("@SignName_", StringComparison.OrdinalIgnoreCase) && signType == "DF")
+                                val = "";
+
+                            foreach (var cell in ws.CellsUsed(c =>
+                                !c.HasFormula &&
+                                !c.Value.IsBlank &&
+                                c.Value.ToString().Contains(key, StringComparison.OrdinalIgnoreCase)))
+                            {
+                                string oldVal = cell.GetString();
+                                cell.Value = oldVal.Replace(key, val, StringComparison.OrdinalIgnoreCase);
+                            }
+                        }
+                    }
+                }
+
+                foreach (var ws in wb.Worksheets)
+                    if (ws.Protection.IsProtected)
+                        ws.Protection.Unprotect();
+
+                InsertTableFromJson(wb, tablejson);
+                foreach (var ws in wb.Worksheets)
+                    RemoveCheckRows(ws);
+
+                foreach (var ws in wb.Worksheets)
+                {
+                    foreach (var cell in ws.CellsUsed(c => c.HasFormula))
+                    {
+                        var formula = cell.FormulaA1?.ToUpper() ?? "";
+                        if (formula.Contains("SUM(") && formula.Contains("INDEX"))
+                        {
+                            try
+                            {
+                                ws.Workbook.RecalculateAllFormulas();
+                                var val = cell.Value;
+                                cell.Value = val;
+                            }
+                            catch { }
+                        }
+
+                        var displayedValue = cell.GetFormattedString();
+                        if (!string.IsNullOrWhiteSpace(displayedValue))
+                            cell.SetValue(displayedValue);
+                    }
+                }
+
+                wb.SaveAs(savedExcelPath);
+                wb.Dispose();
+            }
 
             // === Convert Excel sang PDF ===
             try
@@ -52,6 +178,10 @@ namespace DMS.Lib.Files
                         pdfStream.CopyTo(fileStream);
                     }
                 }
+
+                // Xóa file tạm nếu tồn tại
+                if (File.Exists(tempXlsxPath) && tempXlsxPath != templatePath)
+                    File.Delete(tempXlsxPath);
 
                 return savedPdfPath;
             }
