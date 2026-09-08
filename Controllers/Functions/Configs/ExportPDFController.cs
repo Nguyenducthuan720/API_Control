@@ -10,7 +10,6 @@ using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.Hosting;
 using System.Collections;
 using System.Text;
-using System.Text.Json;
 using static APISmartCity.lib.Function;
 
 namespace DMS.Controllers.Functions.Configs
@@ -75,7 +74,19 @@ namespace DMS.Controllers.Functions.Configs
                     { "@CmpnID", _UserInfo.CmpnID }
                 };
 
-                DataResponse dataResponse = await GetDataResponse(parameters, _ConfigurationDB, _ConfigurationDB, _ProcedureName, request);
+                // HTML uses the same template, approver and replacement JSON as PDF.
+                // Extention1=HTML selects the output/save route only.
+                object infoRequest = request;
+                if (string.Equals(request.Extention1, "HTML", StringComparison.OrdinalIgnoreCase))
+                {
+                    infoRequest = new
+                    {
+                        request.FactorID, request.EntryID, request.OID, request.TempID,
+                        Extention1 = "", request.Extention2, request.Extention3,
+                        request.Extention4, request.Extention5, request.Json
+                    };
+                }
+                DataResponse dataResponse = await GetDataResponse(parameters, _ConfigurationDB, _ConfigurationDB, _ProcedureName, infoRequest);
 
                 if (dataResponse.Result?.Count <= 1 || dataResponse.Result[0].Count == 0) return Ok(dataResponse);
 
@@ -116,8 +127,6 @@ namespace DMS.Controllers.Functions.Configs
                 bool exportHtml = fileExtension == ".HTML"
                     || fileExtension == ".HTM"
                     || string.Equals(request.Extention1, "HTML", StringComparison.OrdinalIgnoreCase);
-                if (exportHtml)
-                    UserFullName = ResolveUserFullName(UserFullName, json, CurrentStep);
 
                 if (exportHtml)
                 {
@@ -129,7 +138,9 @@ namespace DMS.Controllers.Functions.Configs
                         SignType,
                         tablejson,
                         UserFullName,
-                        _htmlRenderer
+                        _htmlRenderer,
+                        _SettingUpload.DiskFolderSave,
+                        _SettingUpload.LinkFolderSave
                     );
                 }
                 else if (fileExtension == ".XLS" || fileExtension == ".XLSX")
@@ -345,51 +356,6 @@ namespace DMS.Controllers.Functions.Configs
             var relativePath = string.Join("/", _UserInfo.CmpnID, factorId, entryId, oidFolder, fileName);
             var baseUrl = $"{Request.Scheme}://{Request.Host}{Request.PathBase}".TrimEnd('/');
             return $"{baseUrl}/api/ExportPDF/PreviewHTML?path={Uri.EscapeDataString(relativePath)}";
-        }
-
-        private static string ResolveUserFullName(string metadataName, string json, string currentStep)
-        {
-            if (!string.IsNullOrWhiteSpace(metadataName))
-                return metadataName.Trim();
-
-            if (string.IsNullOrWhiteSpace(json))
-                return string.Empty;
-
-            try
-            {
-                using var document = JsonDocument.Parse(json);
-                if (document.RootElement.ValueKind != JsonValueKind.Object)
-                    return string.Empty;
-
-                var step = int.TryParse(currentStep, out var parsedStep) && parsedStep > 0
-                    ? parsedStep
-                    : 1;
-                var keys = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
-                {
-                    "@UserFullName",
-                    "UserFullName",
-                    $"@SignName_C{step}",
-                    $"SignName_C{step}"
-                };
-
-                foreach (var property in document.RootElement.EnumerateObject())
-                {
-                    if (!keys.Contains(property.Name))
-                        continue;
-
-                    var value = property.Value.ValueKind == JsonValueKind.String
-                        ? property.Value.GetString()
-                        : property.Value.ToString();
-                    if (!string.IsNullOrWhiteSpace(value))
-                        return value.Trim();
-                }
-            }
-            catch (JsonException)
-            {
-                // The existing renderer handles invalid JSON through its normal error path.
-            }
-
-            return string.Empty;
         }
 
         private static void AddPreviewLink(DataResponse response, string oid, string previewLink)

@@ -16,17 +16,17 @@ public static class FileHTML
     public static string ExportTemplateToHtml(
         string templatePath, string outputFolder, string outputFileName,
         string jsonReplacements, string signType, string tablejson, string userFullName,
-        HandlebarsHtmlRenderer renderer)
+        HandlebarsHtmlRenderer renderer, string storageRoot = "", string storageUrl = "")
     {
         return ExportTemplateToHtmlAsync(
             templatePath, outputFolder, outputFileName, jsonReplacements,
-            signType, tablejson, userFullName, renderer).GetAwaiter().GetResult();
+            signType, tablejson, userFullName, renderer, storageRoot, storageUrl).GetAwaiter().GetResult();
     }
 
     public static async Task<string> ExportTemplateToHtmlAsync(
         string templatePath, string outputFolder, string outputFileName,
         string jsonReplacements, string signType, string tablejson, string userFullName,
-        HandlebarsHtmlRenderer renderer)
+        HandlebarsHtmlRenderer renderer, string storageRoot = "", string storageUrl = "")
     {
         var databaseTemplatePath = templatePath;
         templatePath = ResolveExistingPath(templatePath);
@@ -36,9 +36,10 @@ public static class FileHTML
             throw new FileNotFoundException($"Không tìm thấy file template: {databaseTemplatePath}");
 
         var extension = Path.GetExtension(templatePath).ToLowerInvariant();
+        // The legacy procedure selects signature slots and the previous signed template.
         if (extension is ".xlsx" or ".xlsm" or ".xltx")
         {
-            var prepared = await PrepareSignatureFilesAsync(jsonReplacements, outputFolder);
+            var prepared = await PrepareSignatureFilesAsync(jsonReplacements, storageRoot, storageUrl);
             try
             {
                 var workbookPath = FileExcelAPI.ExportTemplateToExcel(
@@ -80,7 +81,17 @@ public static class FileHTML
             throw new InvalidOperationException("Template HTML phải là .html, .htm, .hbs, .handlebars hoặc workbook OpenXML.");
 
         var source = File.ReadAllText(templatePath, Encoding.UTF8);
-        var html = RenderTemplate(source, jsonReplacements, signType, tablejson, renderer, userFullName);
+        var signatures = await PrepareSignatureFilesAsync(jsonReplacements, storageRoot, storageUrl);
+        string html;
+        try
+        {
+            html = RenderTemplate(source, signatures.Json, signType, tablejson, renderer, userFullName);
+        }
+        finally
+        {
+            foreach (var file in signatures.TemporaryFiles)
+                File.Delete(file);
+        }
         Directory.CreateDirectory(outputFolder);
         var output = Path.Combine(outputFolder, outputFileName + ".html");
         await File.WriteAllTextAsync(output, html, new UTF8Encoding(false));
@@ -88,7 +99,7 @@ public static class FileHTML
     }
 
     private static async Task<(string Json, List<string> TemporaryFiles)> PrepareSignatureFilesAsync(
-        string jsonReplacements, string outputFolder)
+        string jsonReplacements, string storageRoot, string storageUrl)
     {
         var json = string.IsNullOrWhiteSpace(jsonReplacements) ? "{}" : jsonReplacements;
         var values = JsonSerializer.Deserialize<Dictionary<string, object>>(json)
@@ -99,14 +110,35 @@ public static class FileHTML
                      .Where(k => k.StartsWith("@SignLink_", StringComparison.OrdinalIgnoreCase))
                      .ToList())
         {
-            var source = values[key]?.ToString();
+            var source = values[key]?.ToString()?.Trim();
+            if (string.IsNullOrWhiteSpace(source) || source.StartsWith("@SignLink_", StringComparison.OrdinalIgnoreCase))
+                continue;
             if (!Uri.TryCreate(source, UriKind.Absolute, out var uri) ||
                 (uri.Scheme != Uri.UriSchemeHttp && uri.Scheme != Uri.UriSchemeHttps))
-                continue;
+            {
+                var localPath = ResolveExistingPath(source);
+                if (File.Exists(localPath))
+                {
+                    values[key] = localPath;
+                    continue;
+                }
+                // Resolve the same DB asset on the configured file server when running locally.
+                var prefix = storageRoot.Replace('\\', '/').TrimEnd('/') + "/";
+                var normalized = source.Replace('\\', '/');
+                if (string.IsNullOrWhiteSpace(storageRoot) || string.IsNullOrWhiteSpace(storageUrl) ||
+                    !normalized.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
+                    throw new FileNotFoundException($"Không đọc được ảnh chữ ký {key} do procedure trả về.", source);
+                var relative = normalized[prefix.Length..].Split('/');
+                if (relative.Any(segment => segment is "." or ".."))
+                    throw new InvalidOperationException("Đường dẫn ảnh chữ ký không hợp lệ.");
+                uri = new Uri(storageUrl.TrimEnd('/') + "/" + string.Join("/", relative.Select(Uri.EscapeDataString)));
+            }
 
             var localFile = await DownloadSignatureAsync(uri);
             if (string.IsNullOrWhiteSpace(localFile))
-                continue;
+            {
+                throw new IOException($"Không tải được ảnh chữ ký {key} do procedure trả về.");
+            }
 
             values[key] = localFile;
             temporaryFiles.Add(localFile);
@@ -205,9 +237,16 @@ public static class FileHTML
         var model = MakeModel(values, tokens);
         foreach (var key in values.Keys.Where(k => k.StartsWith("@SignLink_", StringComparison.OrdinalIgnoreCase)))
         {
-            var path = values[key]?.ToString();
-            if (string.IsNullOrWhiteSpace(path)) continue;
-            if (!File.Exists(path)) throw new FileNotFoundException("Không tìm thấy ảnh chữ ký do procedure trả về.", path);
+            var path = values[key]?.ToString()?.Trim();
+            if (string.IsNullOrWhiteSpace(path) || path.StartsWith("@SignLink_", StringComparison.OrdinalIgnoreCase))
+            {
+                model[key.TrimStart('@')] = key;
+                continue;
+            }
+            if (!File.Exists(path))
+            {
+                throw new FileNotFoundException($"Không đọc được ảnh chữ ký {key} do procedure trả về.", path);
+            }
             var extension = Path.GetExtension(path).ToLowerInvariant();
             var mime = extension switch
             {
@@ -240,10 +279,6 @@ public static class FileHTML
             model[key.TrimStart('@')] = "data:" + mime + ";base64," + Convert.ToBase64String(image);
             model["Has" + key.TrimStart('@')] = true;
         }
-        if (signType == "DF")
-            foreach (var key in values.Keys.Where(k => k.StartsWith("@SignName_", StringComparison.OrdinalIgnoreCase)))
-                model[key.TrimStart('@')] = string.Empty;
-
         foreach (var table in FileExcelAPI.ReadTableData(tablejson))
         {
             model["table_" + table.Key] = table.Value.Select((row, index) =>
@@ -257,9 +292,16 @@ public static class FileHTML
         var template = Regex.Replace(source, pattern,
             m => m.Value.StartsWith("@table_", StringComparison.OrdinalIgnoreCase)
                 ? m.Value : "{{[" + m.Value[1..] + "]}}");
+        // A previous Excel-derived HTML file keeps unfilled signature cells as text.
+        // Render those cells as images; leave existing images and src bindings intact.
+        template = Regex.Replace(template,
+            @"(?<=>)\s*\{\{\[(SignLink_C\d{1,2})\]\}\}\s*(?=<)",
+            match => "{{#if Has" + match.Groups[1].Value + "}}<img class=\"excel-signature\" " +
+                "style=\"width:180px;height:60px;object-fit:contain;max-width:100%\" " +
+                "src=\"{{[" + match.Groups[1].Value + "]}}\" alt=\"Chữ ký\">" +
+                "{{else}}{{[" + match.Groups[1].Value + "]}}{{/if}}");
         return renderer.RenderSource(template, model);
     }
-
     private static Dictionary<string, object> MakeModel(Dictionary<string, object> values, List<string> tokens)
     {
         var model = new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase);

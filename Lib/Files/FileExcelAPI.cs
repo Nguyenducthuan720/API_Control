@@ -126,10 +126,13 @@ namespace DMS.Lib.Files
                             string ext = Path.GetExtension(val)?.ToLower();
                             //int signIndex = 0; Bổ sung nếu cần xử lý chèn nhiều chữ ký cùng loại
 
-                            // HTML preview không được tự chèn chữ ký khi ảnh procedure trả về
-                            // không tồn tại trên máy hiện tại; giữ nguyên placeholder để render.
-                            if (preserveUnsignedSignatures && !File.Exists(imgPath))
+                            if (preserveUnsignedSignatures &&
+                                (string.IsNullOrWhiteSpace(val) || val.StartsWith("@SignLink_", StringComparison.OrdinalIgnoreCase)))
                                 continue;
+
+                            // Link có dữ liệu nhưng không đọc được ảnh là lỗi, không phải chưa ký.
+                            if (preserveUnsignedSignatures && !File.Exists(imgPath))
+                                throw new FileNotFoundException($"Không đọc được ảnh chữ ký {key} do procedure trả về.", imgPath);
 
                             // Nếu là SVG thì chuyển sang PNG
                             if (ext == ".svg")
@@ -149,7 +152,9 @@ namespace DMS.Lib.Files
                             var matchedCells = ws.CellsUsed(c =>
                                                 !c.HasFormula &&
                                                 !c.Value.IsBlank &&
-                                                c.Value.ToString().Contains(key, StringComparison.OrdinalIgnoreCase))
+                                                (preserveUnsignedSignatures
+                                                    ? Regex.IsMatch(c.GetString(), Regex.Escape(key) + @"(?![A-Za-z0-9_])", RegexOptions.IgnoreCase)
+                                                    : c.Value.ToString().Contains(key, StringComparison.OrdinalIgnoreCase)))
                                                 .ToList();
 
                             // === Tìm ô chứa placeholder ===
@@ -209,7 +214,8 @@ namespace DMS.Lib.Files
                         else
                         {
                             // === Xử lý @SignName (ẩn nếu DF) ===
-                            if (key.StartsWith("@SignName_", StringComparison.OrdinalIgnoreCase) && signType == "DF")
+                            if (key.StartsWith("@SignName_", StringComparison.OrdinalIgnoreCase) &&
+                                signType == "DF" && !preserveUnsignedSignatures)
                             {
                                 val = "";
                             }
@@ -221,7 +227,10 @@ namespace DMS.Lib.Files
                                         c.Value.ToString().Contains(key, StringComparison.OrdinalIgnoreCase)))
                             {
                                 string oldVal = cell.GetString();
-                                cell.Value = oldVal.Replace(key, val, StringComparison.OrdinalIgnoreCase);
+                                cell.Value = preserveMissingValues
+                                    ? Regex.Replace(oldVal, Regex.Escape(key) + @"(?![A-Za-z0-9_])",
+                                        _ => val, RegexOptions.IgnoreCase)
+                                    : oldVal.Replace(key, val, StringComparison.OrdinalIgnoreCase);
                             }
                         }
                     }
@@ -283,7 +292,6 @@ namespace DMS.Lib.Files
                 File.Delete(tempXlsxPath);
             return savedExcelPath;
         }
-
         private static void ClearUnresolvedPlaceholders(XLWorkbook workbook, bool preserveSignatures)
         {
             const string pattern = @"(?<!\w)@[A-Za-z_][A-Za-z0-9_]*(?:%)?";

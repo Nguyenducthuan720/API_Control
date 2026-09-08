@@ -286,8 +286,11 @@ namespace DMS.Lib.Files
         {
             if (key.StartsWith("SignLink", StringComparison.OrdinalIgnoreCase))
             {
-                return "{{#if " + key + "}}<img class=\"excel-signature\" src=\"{{" + key + "}}\" alt=\"Chữ ký\">{{/if}}";
+                return "{{#if " + key + "}}<img class=\"excel-signature\" src=\"{{" + key + "}}\" alt=\"Chữ ký\">{{else}}@" + key + "{{/if}}";
             }
+
+            if (key.StartsWith("SignNote", StringComparison.OrdinalIgnoreCase))
+                return "{{#if " + key + "}}{{" + key + "}}{{else}}@" + key + "{{/if}}";
 
             if (key.StartsWith("SignName", StringComparison.OrdinalIgnoreCase))
             {
@@ -519,13 +522,7 @@ namespace DMS.Lib.Files
                 }
             }
 
-            foreach (var key in model.Keys
-                         .Where(key => key.StartsWith("SignLink", StringComparison.OrdinalIgnoreCase))
-                         .ToList())
-            {
-                model[key] = signatureUrl ?? string.Empty;
-            }
-
+            // Keep each procedure field intact; a shared image is not a per-slot value.
             model["SignatureUrl"] = signatureUrl ?? string.Empty;
             model["SignType"] = signType ?? string.Empty;
             model["UserFullName"] = string.IsNullOrWhiteSpace(userFullName)
