@@ -11,6 +11,8 @@ namespace DMS.Lib.Files
     {
         private readonly ConcurrentDictionary<string, CachedTemplate> _cache = new(StringComparer.OrdinalIgnoreCase);
 
+        public string RenderSource(string source, object model) => Handlebars.Compile(source)(model);
+
         public string Render(string templatePath, object model)
         {
             if (string.IsNullOrWhiteSpace(templatePath))

@@ -28,7 +28,8 @@ namespace DMS.Controllers.Functions.Configs
         private readonly ILogger<ExportPDFController> _logger;
         private readonly DBFolder _SettingOther;
         private readonly CompanyUpload _SettingUpload;
-        private readonly NLTShipping.Export.FileHTML _htmlExport;
+        private readonly HandlebarsHtmlRenderer _htmlRenderer;
+        private readonly IConfiguration _configuration;
         private readonly IWebHostEnvironment _environment;
 
         public ExportPDFController(
@@ -36,14 +37,16 @@ namespace DMS.Controllers.Functions.Configs
             WordToPdfService wordDocumentService,
             ExcelToPdfService excelToPdfService,
             ILogger<ExportPDFController> logger,
-            NLTShipping.Export.FileHTML htmlExport,
+            HandlebarsHtmlRenderer htmlRenderer,
+            IConfiguration configuration,
             IWebHostEnvironment environment)
         {
             _UserInfo = userInfo;
             _wordToPdfService = wordDocumentService;
             _excelToPdfService = excelToPdfService;
             _logger = logger;
-            _htmlExport = htmlExport;
+            _htmlRenderer = htmlRenderer;
+            _configuration = configuration;
             _environment = environment;
             _ConfigurationDB = Global.ListDB?.Find(item => item.DBType == "CON")?.DBString!;
             _SettingOther = Global.ListFolder?.Find(item => item.Type == "Print");
@@ -104,8 +107,25 @@ namespace DMS.Controllers.Functions.Configs
                 linkview = linkview.Replace('\\', '/').Replace(@"\\", @"/");
 
 
-                string fileExtension = Path.GetExtension(exportTemplate)?.ToLower();
-                if (fileExtension.ToUpper() == ".XLS" || fileExtension.ToUpper() == ".XLSX")
+                string fileExtension = Path.GetExtension(exportTemplate)?.ToUpperInvariant() ?? string.Empty;
+                bool exportHtml = fileExtension == ".HTML"
+                    || fileExtension == ".HTM"
+                    || string.Equals(request.Extention1, "HTML", StringComparison.OrdinalIgnoreCase);
+
+                if (exportHtml)
+                {
+                    FileHTML.ExportTemplateToHtml(
+                        exportTemplate,
+                        folder,
+                        safeOid,
+                        json,
+                        SignType,
+                        tablejson,
+                        UserFullName,
+                        _htmlRenderer
+                    );
+                }
+                else if (fileExtension == ".XLS" || fileExtension == ".XLSX")
                 {
                     FileExcelAPI.ExportTemplateToPdf(
                         exportTemplate,
@@ -118,8 +138,7 @@ namespace DMS.Controllers.Functions.Configs
                         _excelToPdfService
                     );
                 }
-
-                if (fileExtension.ToUpper() == ".DOC" || fileExtension.ToUpper() == ".DOCX")
+                else if (fileExtension == ".DOC" || fileExtension == ".DOCX")
                 {
                     await FileWord.ExportTemplateToPdf(
                         exportTemplate,
@@ -131,9 +150,7 @@ namespace DMS.Controllers.Functions.Configs
                         _wordToPdfService
                     );
                 }
-
-
-                if (fileExtension.ToUpper() == ".PDF")
+                else if (fileExtension == ".PDF")
                 {
                     FilePDF.ExportTemplateToPdf(
                         exportTemplate,
@@ -145,8 +162,9 @@ namespace DMS.Controllers.Functions.Configs
                     );
                 }
 
-                string LinkExportLocal = folder + "\\" + fileNames + fileExtension;
-                string LinkExportView = linkview + "/" + fileNames + ".pdf";
+                string outputExtension = exportHtml ? ".html" : fileExtension.ToLowerInvariant();
+                string LinkExportLocal = folder + "\\" + fileNames + outputExtension;
+                string LinkExportView = linkview + "/" + fileNames + (exportHtml ? ".html" : ".pdf");
 
 
                 // Step 5.1: Gộp file PDF nếu có FileAttach
@@ -155,7 +173,7 @@ namespace DMS.Controllers.Functions.Configs
                 string mergedLinkExportLocal = Path.Combine(folder, $"{mergedFileName}.pdf").Replace('/', '\\').Replace(@"\\", @"\");
                 string mergedLinkExportView = $"{linkview}/{mergedFileName}.pdf";
 
-                if (!string.IsNullOrEmpty(FileAttach))
+                if (!exportHtml && !string.IsNullOrEmpty(FileAttach))
                 {
 
                     var pdfFiles = new List<string> { mergedPdfPath };
@@ -167,7 +185,7 @@ namespace DMS.Controllers.Functions.Configs
 
                     if (pdfFiles.Count > 1)
                     {
-                        mergedPdfPath = FilePdfMerge.MergePdfs(pdfFiles, folder, mergedFileName, fileExtension,
+                        mergedPdfPath = FilePdfMerge.MergePdfs(pdfFiles, folder, mergedFileName, fileExtension.ToLowerInvariant(),
                         exportTemplate,
                         folder,
                         safeOid,
@@ -188,7 +206,8 @@ namespace DMS.Controllers.Functions.Configs
                     { "@UserIDCurent", _UserInfo.UserID },
                     { "@LinkExportLocal", LinkExportLocal },
                     { "@LinkExportView", LinkExportView },
-                    { "@FileMerge", mergedLinkExportLocal },
+                    { "@Extention1", exportHtml ? "HTML" : request.Extention1 },
+                    { "@FileMerge", exportHtml ? string.Empty : mergedLinkExportLocal },
                     { "@CmpnID", _UserInfo.CmpnID },
                     { "@FactorID", request.FactorID },
                     { "@EntryID", request.EntryID },
@@ -218,8 +237,9 @@ namespace DMS.Controllers.Functions.Configs
         [HttpPost]
         public async Task<IActionResult> ExportHTML(ExportPDF.Request.Get request)
         {
-            return Ok(await _htmlExport.ExportAsync(request,
-                $"{Request.Scheme}://{Request.Host}{Request.PathBase}"));
+            request ??= new ExportPDF.Request.Get();
+            request.Extention1 = "HTML";
+            return await ExportPDF(request);
         }
 
         [AllowAnonymous]
@@ -254,7 +274,7 @@ namespace DMS.Controllers.Functions.Configs
             if (setting == null || string.IsNullOrWhiteSpace(setting.DiskFolderSave))
                 return NotFound();
 
-            var rootPath = _htmlExport.GetStorageRoot(setting);
+            var rootPath = GetStorageRoot(setting);
             var relativePath = string.Join(
                 Path.DirectorySeparatorChar,
                 segments);
@@ -291,6 +311,16 @@ namespace DMS.Controllers.Functions.Configs
             {
                 return Ok(new DataResponse(ex.Message, "", "-1"));
             }
+        }
+
+        private string GetStorageRoot(CompanyUpload setting)
+        {
+            var root = _configuration["ExportHtml:StorageRoot"];
+            if (string.IsNullOrWhiteSpace(root))
+                root = setting.DiskFolderSave;
+            if (string.IsNullOrWhiteSpace(root))
+                throw new InvalidOperationException("Chưa cấu hình DiskFolderSave hoặc ExportHtml:StorageRoot.");
+            return Path.GetFullPath(root.Replace('\\', Path.DirectorySeparatorChar));
         }
 
         private void CleanupOldFiles(string folderPath, TimeSpan maxAge)
