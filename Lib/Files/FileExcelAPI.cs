@@ -83,7 +83,8 @@ namespace DMS.Lib.Files
             string savedExcelPath = Path.Combine(outputFolder, $"{outputFileName}.xlsx");
             string savedPngPath = Path.Combine(outputFolder, $"{outputFileName}.png");
 
-            var replacements = JsonSerializer.Deserialize<Dictionary<string, object>>(jsonReplacements)
+            var replacements = JsonSerializer.Deserialize<Dictionary<string, object>>(
+                       string.IsNullOrWhiteSpace(jsonReplacements) ? "{}" : jsonReplacements)
                    ?? new Dictionary<string, object>();
             File.Copy(templatePath, tempXlsxPath, true);
             try { File.Delete(tempXlsxPath + ":Zone.Identifier"); } catch { }
@@ -124,6 +125,11 @@ namespace DMS.Lib.Files
                             string imgPath = val;
                             string ext = Path.GetExtension(val)?.ToLower();
                             //int signIndex = 0; Bổ sung nếu cần xử lý chèn nhiều chữ ký cùng loại
+
+                            // HTML preview không được tự chèn chữ ký khi ảnh procedure trả về
+                            // không tồn tại trên máy hiện tại; giữ nguyên placeholder để render.
+                            if (preserveUnsignedSignatures && !File.Exists(imgPath))
+                                continue;
 
                             // Nếu là SVG thì chuyển sang PNG
                             if (ext == ".svg")

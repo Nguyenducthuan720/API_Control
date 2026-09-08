@@ -1,40 +1,79 @@
 using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
+using System.Net.Http;
 
 namespace DMS.Lib.Files;
 
 /// <summary>Fills a selected HTML template with the procedure's JSON, without database access.</summary>
 public static class FileHTML
 {
+    private static readonly HttpClient SignatureClient = new()
+    {
+        Timeout = TimeSpan.FromSeconds(30)
+    };
+
     public static string ExportTemplateToHtml(
         string templatePath, string outputFolder, string outputFileName,
         string jsonReplacements, string signType, string tablejson, string userFullName,
         HandlebarsHtmlRenderer renderer)
     {
+        return ExportTemplateToHtmlAsync(
+            templatePath, outputFolder, outputFileName, jsonReplacements,
+            signType, tablejson, userFullName, renderer).GetAwaiter().GetResult();
+    }
+
+    public static async Task<string> ExportTemplateToHtmlAsync(
+        string templatePath, string outputFolder, string outputFileName,
+        string jsonReplacements, string signType, string tablejson, string userFullName,
+        HandlebarsHtmlRenderer renderer)
+    {
+        var databaseTemplatePath = templatePath;
+        templatePath = ResolveExistingPath(templatePath);
+        outputFolder = ResolveOutputFolder(outputFolder);
+
         if (!File.Exists(templatePath))
-            throw new FileNotFoundException($"Không tìm thấy file template: {templatePath}");
+            throw new FileNotFoundException($"Không tìm thấy file template: {databaseTemplatePath}");
 
         var extension = Path.GetExtension(templatePath).ToLowerInvariant();
         if (extension is ".xlsx" or ".xlsm" or ".xltx")
         {
-            var workbookPath = FileExcelAPI.ExportTemplateToExcel(
-                templatePath,
-                outputFolder,
-                outputFileName,
-                jsonReplacements,
-                signType,
-                tablejson,
-                userFullName,
-                clearUnresolvedPlaceholders: false,
-                preserveUnsignedSignatures: true,
-                preserveMissingValues: true);
+            var prepared = await PrepareSignatureFilesAsync(jsonReplacements, outputFolder);
+            try
+            {
+                var workbookPath = FileExcelAPI.ExportTemplateToExcel(
+                    templatePath,
+                    outputFolder,
+                    outputFileName,
+                    prepared.Json,
+                    signType,
+                    tablejson,
+                    userFullName,
+                    clearUnresolvedPlaceholders: false,
+                    preserveUnsignedSignatures: true,
+                    preserveMissingValues: true);
 
-            var workbookHtml = FileExcelToHtml.ConvertWorkbookToHtml(workbookPath);
-            Directory.CreateDirectory(outputFolder);
-            var workbookOutput = Path.Combine(outputFolder, outputFileName + ".html");
-            File.WriteAllText(workbookOutput, workbookHtml, new UTF8Encoding(false));
-            return workbookOutput;
+                var workbookHtml = FileExcelToHtml.ConvertWorkbookToHtml(workbookPath);
+                Directory.CreateDirectory(outputFolder);
+                var workbookOutput = Path.Combine(outputFolder, outputFileName + ".html");
+                await File.WriteAllTextAsync(workbookOutput, workbookHtml, new UTF8Encoding(false));
+                return workbookOutput;
+            }
+            finally
+            {
+                foreach (var file in prepared.TemporaryFiles)
+                {
+                    try
+                    {
+                        if (File.Exists(file))
+                            File.Delete(file);
+                    }
+                    catch
+                    {
+                        // A temporary signature file must not hide the export result.
+                    }
+                }
+            }
         }
 
         if (extension is not (".html" or ".htm" or ".hbs" or ".handlebars"))
@@ -44,8 +83,107 @@ public static class FileHTML
         var html = RenderTemplate(source, jsonReplacements, signType, tablejson, renderer, userFullName);
         Directory.CreateDirectory(outputFolder);
         var output = Path.Combine(outputFolder, outputFileName + ".html");
-        File.WriteAllText(output, html, new UTF8Encoding(false));
+        await File.WriteAllTextAsync(output, html, new UTF8Encoding(false));
         return output;
+    }
+
+    private static async Task<(string Json, List<string> TemporaryFiles)> PrepareSignatureFilesAsync(
+        string jsonReplacements, string outputFolder)
+    {
+        var json = string.IsNullOrWhiteSpace(jsonReplacements) ? "{}" : jsonReplacements;
+        var values = JsonSerializer.Deserialize<Dictionary<string, object>>(json)
+            ?? new Dictionary<string, object>();
+        var temporaryFiles = new List<string>();
+
+        foreach (var key in values.Keys
+                     .Where(k => k.StartsWith("@SignLink_", StringComparison.OrdinalIgnoreCase))
+                     .ToList())
+        {
+            var source = values[key]?.ToString();
+            if (!Uri.TryCreate(source, UriKind.Absolute, out var uri) ||
+                (uri.Scheme != Uri.UriSchemeHttp && uri.Scheme != Uri.UriSchemeHttps))
+                continue;
+
+            var localFile = await DownloadSignatureAsync(uri);
+            if (string.IsNullOrWhiteSpace(localFile))
+                continue;
+
+            values[key] = localFile;
+            temporaryFiles.Add(localFile);
+        }
+
+        return (JsonSerializer.Serialize(values), temporaryFiles);
+    }
+
+    private static async Task<string> DownloadSignatureAsync(Uri uri)
+    {
+        try
+        {
+            using var response = await SignatureClient.GetAsync(uri, HttpCompletionOption.ResponseHeadersRead);
+            if (!response.IsSuccessStatusCode)
+                return string.Empty;
+
+            var extension = GetSignatureExtension(uri, response.Content.Headers.ContentType?.MediaType);
+            if (string.IsNullOrWhiteSpace(extension))
+                return string.Empty;
+
+            var localFile = Path.Combine(
+                Path.GetTempPath(),
+                "nlt-signature-" + Guid.NewGuid().ToString("N") + extension);
+            await using var source = await response.Content.ReadAsStreamAsync();
+            await using var destination = File.Create(localFile);
+            await source.CopyToAsync(destination);
+            return localFile;
+        }
+        catch (HttpRequestException)
+        {
+            return string.Empty;
+        }
+        catch (TaskCanceledException)
+        {
+            return string.Empty;
+        }
+    }
+
+    private static string GetSignatureExtension(Uri uri, string mediaType)
+    {
+        var extension = Path.GetExtension(uri.AbsolutePath)?.ToLowerInvariant();
+        if (extension is ".svg" or ".png" or ".jpg" or ".jpeg" or ".gif" or ".bmp" or ".webp")
+            return extension;
+
+        return mediaType?.ToLowerInvariant() switch
+        {
+            "image/svg+xml" => ".svg",
+            "image/png" => ".png",
+            "image/jpeg" => ".jpg",
+            "image/gif" => ".gif",
+            "image/bmp" => ".bmp",
+            "image/webp" => ".webp",
+            _ => string.Empty
+        };
+    }
+
+    private static string ResolveExistingPath(string path)
+    {
+        if (string.IsNullOrWhiteSpace(path) || File.Exists(path))
+            return path;
+
+        var normalizedPath = NormalizePath(path);
+        return File.Exists(normalizedPath) ? normalizedPath : path;
+    }
+
+    private static string ResolveOutputFolder(string path)
+    {
+        if (string.IsNullOrWhiteSpace(path) || OperatingSystem.IsWindows())
+            return path;
+
+        return NormalizePath(path);
+    }
+
+    private static string NormalizePath(string path)
+    {
+        var normalizedPath = path.Replace('\\', Path.DirectorySeparatorChar);
+        return Path.GetFullPath(normalizedPath);
     }
 
     public static string RenderTemplate(string source, string jsonReplacements, string signType,

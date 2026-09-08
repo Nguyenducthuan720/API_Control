@@ -91,7 +91,10 @@ namespace DMS.Controllers.Functions.Configs
                 string pdfPath = "";
                 int IsSeal = result.IsSeal;
 
-                string json = jsonrs.JsonData;
+                object jsonValue = jsonrs.JsonData;
+                string json = jsonValue?.ToString() ?? "{}";
+                if (string.IsNullOrWhiteSpace(json))
+                    json = "{}";
                 string tablejson = tablejsonrs?.JsonTableData?.ToString() ?? "[]";
 
                 // Step 5: Save PDF
@@ -101,6 +104,7 @@ namespace DMS.Controllers.Functions.Configs
                 string folder = $"{_SettingUpload.DiskFolderSave}/{_UserInfo.CmpnID}/{request.FactorID}/{request.EntryID}/{request.OID.Replace("/", "")}";
                 string linkview = $"{_SettingUpload.LinkFolderSave}/{_UserInfo.CmpnID}/{request.FactorID}/{request.EntryID}/{request.OID.Replace("/", "")}";
                 string fileNames = safeOid;
+                string generatedFilePath = string.Empty;
 
 
                 folder = folder.Replace('/', '\\').Replace(@"\\", @"\");
@@ -114,7 +118,7 @@ namespace DMS.Controllers.Functions.Configs
 
                 if (exportHtml)
                 {
-                    FileHTML.ExportTemplateToHtml(
+                    generatedFilePath = await FileHTML.ExportTemplateToHtmlAsync(
                         exportTemplate,
                         folder,
                         safeOid,
@@ -215,6 +219,16 @@ namespace DMS.Controllers.Functions.Configs
                 };
 
                 var saveData = await GetDataResponse(saveparameters, _ConfigurationDB, _ConfigurationDB, _ProcedureName, null);
+
+                if (exportHtml && System.IO.File.Exists(generatedFilePath))
+                {
+                    var previewLink = BuildPreviewLink(
+                        request.FactorID,
+                        request.EntryID,
+                        request.OID.Replace("/", ""),
+                        fileNames + ".html");
+                    AddPreviewLink(saveData, request.OID, previewLink);
+                }
                
                 //CleanupOldFiles(folder, TimeSpan.FromMinutes(1));
                 //if (CurrentStep == "99")
@@ -321,6 +335,43 @@ namespace DMS.Controllers.Functions.Configs
             if (string.IsNullOrWhiteSpace(root))
                 throw new InvalidOperationException("Chưa cấu hình DiskFolderSave hoặc ExportHtml:StorageRoot.");
             return Path.GetFullPath(root.Replace('\\', Path.DirectorySeparatorChar));
+        }
+
+        private string BuildPreviewLink(string factorId, string entryId, string oidFolder, string fileName)
+        {
+            var relativePath = string.Join("/", _UserInfo.CmpnID, factorId, entryId, oidFolder, fileName);
+            var baseUrl = $"{Request.Scheme}://{Request.Host}{Request.PathBase}".TrimEnd('/');
+            return $"{baseUrl}/api/ExportPDF/PreviewHTML?path={Uri.EscapeDataString(relativePath)}";
+        }
+
+        private static void AddPreviewLink(DataResponse response, string oid, string previewLink)
+        {
+            var rows = new List<Dictionary<string, object>>();
+            if (response?.Result is IEnumerable result && response.Result is not string)
+            {
+                foreach (var item in result)
+                {
+                    if (item is not IDictionary<string, object> fields)
+                        continue;
+
+                    var row = new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase);
+                    foreach (var field in fields)
+                        row[field.Key] = field.Value;
+                    row["PreviewLinkFile"] = previewLink;
+                    rows.Add(row);
+                }
+            }
+
+            if (rows.Count == 0)
+            {
+                rows.Add(new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase)
+                {
+                    ["OID"] = oid,
+                    ["PreviewLinkFile"] = previewLink
+                });
+            }
+
+            response.Result = rows;
         }
 
         private void CleanupOldFiles(string folderPath, TimeSpan maxAge)
