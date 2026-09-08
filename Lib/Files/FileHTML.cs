@@ -30,6 +30,13 @@ public sealed class FileHTML(
     public async Task<DataResponse> ExportAsync(ExportPDF.Request.Get request, string apiBaseUrl)
     {
         var temporarySignatureFiles = new List<string>();
+        string previewLink = null;
+        string previewOid = null;
+
+        DataResponse ExportError(string message) => previewLink == null
+            ? Error(message)
+            : new DataResponse(message,
+                new[] { new { OID = previewOid, PreviewLinkFile = previewLink } }, "-1");
 
         try
         {
@@ -147,6 +154,8 @@ public sealed class FileHTML(
             var relative = string.Join("/", parts);
             var preview = apiBaseUrl + "/api/ExportPDF/PreviewHTML?path="
                 + Uri.EscapeDataString(relative + "/" + name + ".html");
+            previewLink = preview;
+            previewOid = databaseOid;
             if (!publish)
                 return new DataResponse("Đã tạo bản xem thử local; chưa xuất bản và chưa cập nhật link trong DB.",
                     new[] { new { OID = databaseOid, Published = false, DatabaseUpdated = false,
@@ -157,7 +166,7 @@ public sealed class FileHTML(
             // flow intentionally produced ':15006//1/...'.
             var urlRoot = setting.LinkFolderSave?.Replace('\\', '/');
             if (!Uri.TryCreate(urlRoot, UriKind.Absolute, out var uri) || uri.Scheme != "https")
-                return Error("LinkFolderSave phải là URL HTTPS của file server.");
+                return ExportError("LinkFolderSave phải là URL HTTPS của file server.");
             var urlFolder = urlRoot + "/" + string.Join("/", parts.Select(Uri.EscapeDataString));
             var htmlUrl = urlFolder + "/" + name + ".html";
             var excelUrl = urlFolder + "/" + name + ".xlsx";
@@ -175,19 +184,19 @@ public sealed class FileHTML(
                 ["@FileMerge"] = string.Empty
             });
             if (!Success(saved))
-                return Error("File đã xuất bản nhưng cập nhật DB thất bại: " + saved?.Message);
+                return ExportError("File đã xuất bản nhưng cập nhật DB thất bại: " + saved?.Message);
             var readback = await ExecuteAsync("Get-ByID", databaseRequest);
             if (!Success(readback) || Text(Row(readback, 0), "LinkFile") != htmlUrl)
-                return Error("File đã xuất bản nhưng chưa xác nhận được LinkFile trong DB; không tự động rollback.");
+                return ExportError("File đã xuất bản nhưng chưa xác nhận được LinkFile trong DB; không tự động rollback.");
 
             return new DataResponse("Đã xuất bản HTML và xác nhận link trong DB.",
                 new[] { new { OID = databaseOid, Published = true, DatabaseUpdated = true,
-                    LinkFile = htmlUrl, ExcelLinkFile = excelUrl } }, "0");
+                    LinkFile = htmlUrl, ExcelLinkFile = excelUrl, PreviewLinkFile = preview } }, "0");
         }
         catch (Exception ex)
         {
             logger.LogError(ex, "ExportHTML thất bại.");
-            return Error(ex.Message);
+            return ExportError(ex.Message);
         }
         finally
         {
