@@ -10,6 +10,7 @@ using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.Hosting;
 using System.Collections;
 using System.Text;
+using System.Text.Json;
 using static APISmartCity.lib.Function;
 
 namespace DMS.Controllers.Functions.Configs
@@ -115,6 +116,8 @@ namespace DMS.Controllers.Functions.Configs
                 bool exportHtml = fileExtension == ".HTML"
                     || fileExtension == ".HTM"
                     || string.Equals(request.Extention1, "HTML", StringComparison.OrdinalIgnoreCase);
+                if (exportHtml)
+                    UserFullName = ResolveUserFullName(UserFullName, json, CurrentStep);
 
                 if (exportHtml)
                 {
@@ -342,6 +345,51 @@ namespace DMS.Controllers.Functions.Configs
             var relativePath = string.Join("/", _UserInfo.CmpnID, factorId, entryId, oidFolder, fileName);
             var baseUrl = $"{Request.Scheme}://{Request.Host}{Request.PathBase}".TrimEnd('/');
             return $"{baseUrl}/api/ExportPDF/PreviewHTML?path={Uri.EscapeDataString(relativePath)}";
+        }
+
+        private static string ResolveUserFullName(string metadataName, string json, string currentStep)
+        {
+            if (!string.IsNullOrWhiteSpace(metadataName))
+                return metadataName.Trim();
+
+            if (string.IsNullOrWhiteSpace(json))
+                return string.Empty;
+
+            try
+            {
+                using var document = JsonDocument.Parse(json);
+                if (document.RootElement.ValueKind != JsonValueKind.Object)
+                    return string.Empty;
+
+                var step = int.TryParse(currentStep, out var parsedStep) && parsedStep > 0
+                    ? parsedStep
+                    : 1;
+                var keys = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+                {
+                    "@UserFullName",
+                    "UserFullName",
+                    $"@SignName_C{step}",
+                    $"SignName_C{step}"
+                };
+
+                foreach (var property in document.RootElement.EnumerateObject())
+                {
+                    if (!keys.Contains(property.Name))
+                        continue;
+
+                    var value = property.Value.ValueKind == JsonValueKind.String
+                        ? property.Value.GetString()
+                        : property.Value.ToString();
+                    if (!string.IsNullOrWhiteSpace(value))
+                        return value.Trim();
+                }
+            }
+            catch (JsonException)
+            {
+                // The existing renderer handles invalid JSON through its normal error path.
+            }
+
+            return string.Empty;
         }
 
         private static void AddPreviewLink(DataResponse response, string oid, string previewLink)
