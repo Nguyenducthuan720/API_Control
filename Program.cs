@@ -93,7 +93,6 @@ builder.Services.AddScoped<ISAPIService>();
 builder.Services.AddScoped<WordToPdfService>();
 builder.Services.AddScoped<ExcelToPdfService>();
 builder.Services.AddSingleton<HandlebarsHtmlRenderer>();
-builder.Services.AddScoped<NLTShipping.Export.FileHTML>();
 builder.Services.AddSingleton<GoogleTranslateService>();
 builder.Services.AddSingleton<VietmapGeocodeService>();
 builder.Services.AddSingleton<TransferService>();

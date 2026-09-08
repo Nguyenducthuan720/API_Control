@@ -24,135 +24,10 @@ namespace DMS.Lib.Files
             string userFullName,
             ExcelToPdfService excelToPdfService)
         {
-            if (!File.Exists(templatePath))
-                throw new FileNotFoundException($"Không tìm thấy file template: {templatePath}");
-
-            if (!Directory.Exists(outputFolder))
-                Directory.CreateDirectory(outputFolder);
-
-            string fileExtension = Path.GetExtension(templatePath)?.ToLower();
-            string tempXlsxPath = Path.Combine(outputFolder, $"{outputFileName}_temp.xlsx");
-            string savedExcelPath = Path.Combine(outputFolder, $"{outputFileName}.xlsx");
+            var savedExcelPath = ExportTemplateToExcel(templatePath, outputFolder, outputFileName,
+                jsonReplacements, signType, tablejson, userFullName);
             var savedPdfPath = Path.Combine(outputFolder, $"{outputFileName}.pdf");
-            string savedPngPath = Path.Combine(outputFolder, $"{outputFileName}.png");
-
-            var replacements = JsonSerializer.Deserialize<Dictionary<string, object>>(jsonReplacements)
-                   ?? new Dictionary<string, object>();
-            File.Copy(templatePath, tempXlsxPath, true);
-            try { File.Delete(tempXlsxPath + ":Zone.Identifier"); } catch { }
-
-            RewriteExcelByOpenXml(tempXlsxPath);
-            using (var fs = new FileStream(tempXlsxPath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
-            using (var wb = new XLWorkbook(tempXlsxPath))
-            {
-                foreach (var ws in wb.Worksheets)
-                {
-                    foreach (var kv in replacements)
-                    {
-                        string key = kv.Key;
-                        string val = kv.Value?.ToString()?.Trim() ?? "";
-
-                        if (key.StartsWith("@SignLink_", StringComparison.OrdinalIgnoreCase))
-                        {
-                            string imgPath = val;
-                            string ext = Path.GetExtension(val)?.ToLower();
-
-                            if (ext == ".svg")
-                            {
-                                var replacementsSvg = new Dictionary<string, string>
-                                {
-                                    ["@UserName"] = userFullName,
-                                    ["@NgayKy"] = DateTime.Now.ToString("HH:mm:ss dd/MM/yyyy")
-                                };
-                                FileSVG.ReplaceAndConvertSvgToPng(val, savedPngPath, replacementsSvg, 600, 200);
-                                imgPath = savedPngPath;
-                            }
-
-                            if (!File.Exists(imgPath))
-                                continue;
-
-                            var matchedCells = ws.CellsUsed(c =>
-                                !c.HasFormula &&
-                                !c.Value.IsBlank &&
-                                c.Value.ToString().Contains(key, StringComparison.OrdinalIgnoreCase))
-                                .ToList();
-
-                            foreach (var cell in matchedCells)
-                            {
-                                cell.Value = "";
-                                var range = cell.MergedRange() ?? cell.AsRange();
-                                double cellWidthPx = GetRangeWidthInPixels(ws, range);
-                                double cellHeightPx = GetRangeHeightInPixels(ws, range);
-
-                                using (var img = Image.Load(imgPath))
-                                using (var ms = new MemoryStream())
-                                {
-                                    double scale = Math.Min(cellWidthPx / img.Width, cellHeightPx / img.Height) * 0.9;
-                                    int newWidth = Math.Max(1, (int)(img.Width * scale));
-                                    int newHeight = Math.Max(1, (int)(img.Height * scale));
-                                    img.Mutate(x => x.Resize(newWidth, newHeight));
-                                    img.SaveAsPng(ms);
-                                    ms.Seek(0, SeekOrigin.Begin);
-
-                                    var picName = Guid.NewGuid().ToString("N").Substring(0, 30);
-                                    var picture = ws.AddPicture(ms, XLPictureFormat.Png, picName);
-                                    var topLeft = range.FirstCell();
-                                    int offsetX = Math.Max(0, (int)((cellWidthPx - newWidth) / 2));
-                                    int offsetY = Math.Max(0, (int)((cellHeightPx - newHeight) / 2));
-                                    picture.MoveTo(topLeft, offsetX, offsetY);
-                                }
-                            }
-                        }
-                        else
-                        {
-                            if (key.StartsWith("@SignName_", StringComparison.OrdinalIgnoreCase) && signType == "DF")
-                                val = "";
-
-                            foreach (var cell in ws.CellsUsed(c =>
-                                !c.HasFormula &&
-                                !c.Value.IsBlank &&
-                                c.Value.ToString().Contains(key, StringComparison.OrdinalIgnoreCase)))
-                            {
-                                string oldVal = cell.GetString();
-                                cell.Value = oldVal.Replace(key, val, StringComparison.OrdinalIgnoreCase);
-                            }
-                        }
-                    }
-                }
-
-                foreach (var ws in wb.Worksheets)
-                    if (ws.Protection.IsProtected)
-                        ws.Protection.Unprotect();
-
-                InsertTableFromJson(wb, tablejson);
-                foreach (var ws in wb.Worksheets)
-                    RemoveCheckRows(ws);
-
-                foreach (var ws in wb.Worksheets)
-                {
-                    foreach (var cell in ws.CellsUsed(c => c.HasFormula))
-                    {
-                        var formula = cell.FormulaA1?.ToUpper() ?? "";
-                        if (formula.Contains("SUM(") && formula.Contains("INDEX"))
-                        {
-                            try
-                            {
-                                ws.Workbook.RecalculateAllFormulas();
-                                var val = cell.Value;
-                                cell.Value = val;
-                            }
-                            catch { }
-                        }
-
-                        var displayedValue = cell.GetFormattedString();
-                        if (!string.IsNullOrWhiteSpace(displayedValue))
-                            cell.SetValue(displayedValue);
-                    }
-                }
-
-                wb.SaveAs(savedExcelPath);
-                wb.Dispose();
-            }
+            var tempXlsxPath = Path.Combine(outputFolder, $"{outputFileName}_temp.xlsx");
 
             // === Convert Excel sang PDF ===
             try
@@ -208,7 +83,8 @@ namespace DMS.Lib.Files
             string savedExcelPath = Path.Combine(outputFolder, $"{outputFileName}.xlsx");
             string savedPngPath = Path.Combine(outputFolder, $"{outputFileName}.png");
 
-            var replacements = JsonSerializer.Deserialize<Dictionary<string, object>>(jsonReplacements)
+            var replacements = JsonSerializer.Deserialize<Dictionary<string, object>>(
+                       string.IsNullOrWhiteSpace(jsonReplacements) ? "{}" : jsonReplacements)
                    ?? new Dictionary<string, object>();
             File.Copy(templatePath, tempXlsxPath, true);
             try { File.Delete(tempXlsxPath + ":Zone.Identifier"); } catch { }
@@ -249,6 +125,11 @@ namespace DMS.Lib.Files
                             string imgPath = val;
                             string ext = Path.GetExtension(val)?.ToLower();
                             //int signIndex = 0; Bổ sung nếu cần xử lý chèn nhiều chữ ký cùng loại
+
+                            // HTML preview không được tự chèn chữ ký khi ảnh procedure trả về
+                            // không tồn tại trên máy hiện tại; giữ nguyên placeholder để render.
+                            if (preserveUnsignedSignatures && !File.Exists(imgPath))
+                                continue;
 
                             // Nếu là SVG thì chuyển sang PNG
                             if (ext == ".svg")
@@ -362,11 +243,6 @@ namespace DMS.Lib.Files
                 foreach (var ws in wb.Worksheets)
                     if (ws.Protection.IsProtected)
                         ws.Protection.Unprotect();
-                var hasPlaceholder = wb.Worksheets
-                 .SelectMany(ws => ws.CellsUsed())
-                 .Any(c => c.Value.ToString()
-                                .Contains("@table_I", StringComparison.OrdinalIgnoreCase));
-                Console.WriteLine($"Còn placeholder @table_I không? {hasPlaceholder}");
                 InsertTableFromJson(wb, tablejson);
                 foreach (var ws in wb.Worksheets) RemoveCheckRows(ws);
                 if (clearUnresolvedPlaceholders)
@@ -403,7 +279,7 @@ namespace DMS.Lib.Files
             }
                 
 
-            if (File.Exists(tempXlsxPath))
+            if (File.Exists(tempXlsxPath) && tempXlsxPath != templatePath)
                 File.Delete(tempXlsxPath);
             return savedExcelPath;
         }
@@ -477,25 +353,7 @@ namespace DMS.Lib.Files
             if (string.IsNullOrWhiteSpace(tablejson) || tablejson.Trim() == "[]")
                 return;
 
-            List<Dictionary<string, object>> allRows;
-            var json = tablejson.TrimStart();
-            if (json.StartsWith("["))
-                allRows = JsonSerializer.Deserialize<List<Dictionary<string, object>>>(tablejson);
-            else
-                allRows = new List<Dictionary<string, object>>
-        {
-            JsonSerializer.Deserialize<Dictionary<string, object>>(tablejson)
-        };
-
-            if (allRows == null || allRows.Count == 0)
-                return;
-
-            var groupedData = allRows
-                .SelectMany(row => row.Keys
-                    .Where(k => k.StartsWith("@") && k.Contains("_"))
-                    .Select(key => new { Key = key, Row = row }))
-                .GroupBy(x => GetTablePrefix(x.Key))
-                .ToDictionary(g => g.Key, g => g.Select(x => x.Row).Distinct().ToList());
+            var groupedData = ReadTableData(tablejson);
 
             foreach (var ws in wb.Worksheets)
             {
@@ -735,6 +593,32 @@ namespace DMS.Lib.Files
                     ws.Row(startRow).Delete();
                 }
             }
+        }
+
+        internal static Dictionary<string, List<Dictionary<string, object>>> ReadTableData(string tablejson)
+        {
+            if (string.IsNullOrWhiteSpace(tablejson))
+                return new();
+            List<Dictionary<string, object>> allRows;
+            var json = tablejson.TrimStart();
+            if (json.StartsWith("["))
+                allRows = JsonSerializer.Deserialize<List<Dictionary<string, object>>>(tablejson);
+            else
+                allRows = new List<Dictionary<string, object>>
+                {
+                    JsonSerializer.Deserialize<Dictionary<string, object>>(tablejson)
+                };
+
+            if (allRows == null || allRows.Count == 0)
+                return new();
+
+            return allRows
+                .SelectMany(row => row.Keys
+                    .Where(k => k.StartsWith("@") && k.Contains("_"))
+                    .Select(key => new { Key = key, Row = row }))
+                .GroupBy(x => GetTablePrefix(x.Key))
+                .ToDictionary(g => g.Key, g => g.Select(x => x.Row).Distinct().ToList());
+
         }
 
         private static string GetTablePrefix(string key)
