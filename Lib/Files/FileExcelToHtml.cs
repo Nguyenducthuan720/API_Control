@@ -660,7 +660,7 @@ namespace DMS.Lib.Files
 
         private static string WrapDocument(string body)
         {
-            return "<!DOCTYPE html><html lang=\"vi\"><head><meta charset=\"utf-8\">" +
+            var document = "<!DOCTYPE html><html lang=\"vi\"><head><meta charset=\"utf-8\">" +
                    "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">" +
                    "<style>" +
                    "html,body{margin:0;padding:0;background:#f3f4f6;}" +
@@ -673,10 +673,11 @@ namespace DMS.Lib.Files
                    ".excel-picture,.excel-signature{position:absolute;display:block;object-fit:contain;}" +
                    ".excel-picture{z-index:10;pointer-events:none;}" +
                    ".excel-signature{position:relative;display:inline-block;max-width:100%;max-height:100%;vertical-align:middle;}" +
-                   "@media print{html,body{background:#fff}.excel-document{padding:0}.excel-sheet{margin:0;}}" +
                    "</style></head><body><main class=\"excel-document\">" +
                    body +
                    "</main></body></html>";
+
+            return HtmlPrintLayout.Apply(document);
         }
     }
 }

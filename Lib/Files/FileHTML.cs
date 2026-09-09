@@ -411,7 +411,7 @@ public static class FileHTML
                 "style=\"width:180px;height:60px;object-fit:contain;max-width:100%\" " +
                 "src=\"{{[" + match.Groups[1].Value + "]}}\" alt=\"Chữ ký\">" +
                 "{{else}}{{[" + match.Groups[1].Value + "]}}{{/if}}");
-        return renderer.RenderSource(template, model);
+        return HtmlPrintLayout.Apply(renderer.RenderSource(template, model));
     }
     private static Dictionary<string, object> MakeModel(Dictionary<string, object> values, List<string> tokens)
     {

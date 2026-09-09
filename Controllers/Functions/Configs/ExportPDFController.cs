@@ -209,7 +209,8 @@ namespace DMS.Controllers.Functions.Configs
                         htmlOutputPaths["PDF"] = FileHTMLToPdf.ExportHtmlToPdf(
                             renderedHtmlPath,
                             path,
-                            _htmlToPdfConverter);
+                            _htmlToPdfConverter,
+                            _configuration["ExportHtml:ChromiumPath"]);
                     }
 
                     if (htmlOutputs.Contains("XLSX"))

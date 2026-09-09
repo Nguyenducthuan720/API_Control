@@ -372,3 +372,6 @@ docs/**
 
 # Generated local DMS files; keep Configuration templates trackable
 /D:/IIS/TMS/File/DMS/*/SALE_SHIPPINGPRICE/
+
+# Windows path materialized as a literal directory on POSIX during local tests
+/D:?IIS?TMS?File?DMS?*
