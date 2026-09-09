@@ -68,6 +68,21 @@ namespace DMS.Lib.Files
             return BuildHtmlTemplateFromXlsx(templatePath, null);
         }
 
+        /// <summary>
+        /// Builds a complete Handlebars document from the workbook layout.
+        /// The generated bindings are consumed when an edited HTML document is
+        /// imported back into the original workbook template.
+        /// </summary>
+        public static string BuildTemplateDocument(string templatePath)
+        {
+            if (!File.Exists(templatePath))
+                throw new FileNotFoundException(
+                    $"Không tìm thấy file template Excel: {templatePath}",
+                    templatePath);
+
+            return WrapDocument(BuildHtmlTemplateFromXlsx(templatePath, null));
+        }
+
         private static string BuildHtmlTemplateFromXlsx(string templatePath, string signType, bool filled = false)
         {
             var document = new StringBuilder();
@@ -146,8 +161,11 @@ namespace DMS.Lib.Files
                         ? RenderFilledCell(cell)
                         : BuildCellContent(cell, tableType, signType);
                     var style = BuildCellStyle(cell);
+                    var metadata = filled
+                        ? string.Empty
+                        : BuildCellMetadata(cell, tableType);
 
-                    html.Append($"<td{span} style=\"{style}\">{content}</td>");
+                    html.Append($"<td{span}{metadata} style=\"{style}\">{content}</td>");
                 }
 
                 html.Append("</tr>");
@@ -267,6 +285,23 @@ namespace DMS.Lib.Files
                 match => ReplacePlaceholder(match.Groups[1].Value, tableType, signType));
         }
 
+        private static string BuildCellMetadata(IXLCell cell, string tableType)
+        {
+            var metadata = new StringBuilder();
+            metadata.Append(" data-excel-cell=\"");
+            metadata.Append(WebUtility.HtmlEncode(cell.Address.ToString()));
+            metadata.Append('"');
+
+            if (!string.IsNullOrWhiteSpace(tableType))
+            {
+                metadata.Append(" data-excel-table=\"");
+                metadata.Append(WebUtility.HtmlEncode(tableType));
+                metadata.Append('"');
+            }
+
+            return metadata.ToString();
+        }
+
         private static string GetFormulaValue(IXLCell cell)
         {
             try
@@ -286,17 +321,24 @@ namespace DMS.Lib.Files
         {
             if (key.StartsWith("SignLink", StringComparison.OrdinalIgnoreCase))
             {
-                return "{{#if " + key + "}}<img class=\"excel-signature\" src=\"{{" + key + "}}\" alt=\"Chữ ký\">{{else}}@" + key + "{{/if}}";
+                var field = FieldBinding(key);
+                return "{{#if " + key + "}}<img class=\"excel-signature\" data-excel-field=\"" +
+                    field + "\" src=\"{{" + key + "}}\" alt=\"Chữ ký\">{{else}}" +
+                    "<span data-excel-field=\"" + field + "\">@" + key + "</span>{{/if}}";
             }
 
             if (key.StartsWith("SignNote", StringComparison.OrdinalIgnoreCase))
-                return "{{#if " + key + "}}{{" + key + "}}{{else}}@" + key + "{{/if}}";
+            {
+                var field = FieldBinding(key);
+                return "{{#if " + key + "}}<span data-excel-field=\"" + field + "\">{{" + key +
+                    "}}</span>{{else}}<span data-excel-field=\"" + field + "\">@" + key + "</span>{{/if}}";
+            }
 
             if (key.StartsWith("SignName", StringComparison.OrdinalIgnoreCase))
             {
                 return string.Equals(signType, "DF", StringComparison.OrdinalIgnoreCase)
                     ? string.Empty
-                    : "{{" + key + "}}";
+                    : "<span data-excel-field=\"" + FieldBinding(key) + "\">{{" + key + "}}</span>";
             }
 
             if (key.StartsWith("table_", StringComparison.OrdinalIgnoreCase))
@@ -305,10 +347,16 @@ namespace DMS.Lib.Files
             if (!string.IsNullOrWhiteSpace(tableType) &&
                 key.StartsWith(tableType + "_", StringComparison.OrdinalIgnoreCase))
             {
-                return "{{" + key[(tableType.Length + 1)..] + "}}";
+                return "<span data-excel-field=\"" + FieldBinding(key) + "\">{{" +
+                    key[(tableType.Length + 1)..] + "}}</span>";
             }
 
-            return "{{" + key + "}}";
+            return "<span data-excel-field=\"" + FieldBinding(key) + "\">{{" + key + "}}</span>";
+        }
+
+        private static string FieldBinding(string key)
+        {
+            return WebUtility.HtmlEncode(key);
         }
 
         private static string BuildWorksheetPictures(

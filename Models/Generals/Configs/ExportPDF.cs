@@ -27,6 +27,10 @@
 
                 public string TempID { get; set; }
                 public string Extention1 { get; set; }
+                /// <summary>
+                /// Với output HTML: danh sách output bổ sung, phân cách bằng dấu phẩy.
+                /// Hỗ trợ PDF, XLSX, DOCX hoặc ALL. HTML luôn được tạo.
+                /// </summary>
                 public string Extention2 { get; set; }
                 public string Extention3 { get; set; }
                 public string Extention4 { get; set; }

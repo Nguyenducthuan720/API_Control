@@ -11,6 +11,7 @@ using Microsoft.Extensions.Hosting;
 using System.Collections;
 using System.Text;
 using static APISmartCity.lib.Function;
+using WkHtmlToPdfDotNet.Contracts;
 
 namespace DMS.Controllers.Functions.Configs
 {
@@ -31,6 +32,7 @@ namespace DMS.Controllers.Functions.Configs
         private readonly HandlebarsHtmlRenderer _htmlRenderer;
         private readonly IConfiguration _configuration;
         private readonly IWebHostEnvironment _environment;
+        private readonly IConverter _htmlToPdfConverter;
 
         public ExportPDFController(
             UserInfo userInfo,
@@ -39,7 +41,8 @@ namespace DMS.Controllers.Functions.Configs
             ILogger<ExportPDFController> logger,
             HandlebarsHtmlRenderer htmlRenderer,
             IConfiguration configuration,
-            IWebHostEnvironment environment)
+            IWebHostEnvironment environment,
+            IConverter htmlToPdfConverter)
         {
             _UserInfo = userInfo;
             _wordToPdfService = wordDocumentService;
@@ -48,6 +51,7 @@ namespace DMS.Controllers.Functions.Configs
             _htmlRenderer = htmlRenderer;
             _configuration = configuration;
             _environment = environment;
+            _htmlToPdfConverter = htmlToPdfConverter;
             _ConfigurationDB = Global.ListDB?.Find(item => item.DBType == "CON")?.DBString!;
             _SettingOther = Global.ListFolder?.Find(item => item.Type == "Print");
             _SettingUpload = int.TryParse(_UserInfo.CmpnID, out var companyId)
@@ -100,7 +104,6 @@ namespace DMS.Controllers.Functions.Configs
                 string CurrentStep = result.CurrentStep;
                 string UserFullName = result.UserFullName;
                 string FileAttach = result.FileAttach?.ToString() ?? "";
-                string pdfPath = "";
                 int IsSeal = result.IsSeal;
 
                 object jsonValue = jsonrs.JsonData;
@@ -130,8 +133,13 @@ namespace DMS.Controllers.Functions.Configs
 
                 if (exportHtml)
                 {
-                    generatedFilePath = await FileHTML.ExportTemplateToHtmlAsync(
+                    var htmlTemplate = FileHTML.ResolveCanonicalTemplate(
                         exportTemplate,
+                        _configuration["ExportHtml:TemplateRoot"],
+                        request.FactorID,
+                        request.EntryID);
+                    generatedFilePath = await FileHTML.ExportTemplateToHtmlAsync(
+                        htmlTemplate,
                         folder,
                         safeOid,
                         json,
@@ -183,6 +191,55 @@ namespace DMS.Controllers.Functions.Configs
                 string outputExtension = exportHtml ? ".html" : fileExtension.ToLowerInvariant();
                 string LinkExportLocal = folder + "\\" + fileNames + outputExtension;
                 string LinkExportView = linkview + "/" + fileNames + (exportHtml ? ".html" : ".pdf");
+                var htmlOutputPaths = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+                {
+                    ["HTML"] = generatedFilePath
+                };
+
+                if (exportHtml)
+                {
+                    var htmlOutputs = ParseHtmlOutputFormats(request.Extention2);
+                    if (htmlOutputs.Contains("XLSX") || htmlOutputs.Contains("DOCX"))
+                        htmlOutputs.Add("PDF");
+
+                    var renderedHtmlPath = generatedFilePath;
+                    if (htmlOutputs.Contains("PDF"))
+                    {
+                        var path = Path.Combine(folder, fileNames + ".pdf");
+                        htmlOutputPaths["PDF"] = FileHTMLToPdf.ExportHtmlToPdf(
+                            renderedHtmlPath,
+                            path,
+                            _htmlToPdfConverter);
+                    }
+
+                    if (htmlOutputs.Contains("XLSX"))
+                    {
+                        var path = Path.Combine(folder, fileNames + ".xlsx");
+                        var excelTemplate = FileHTML.ResolveOriginalExcelTemplate(
+                            exportTemplate,
+                            _configuration["ExportHtml:ExcelTemplateRoot"],
+                            request.FactorID,
+                            request.EntryID);
+                        htmlOutputPaths["XLSX"] = FileHTMLToExcelTemplate.ExportHtmlToExcel(
+                            renderedHtmlPath,
+                            excelTemplate,
+                            path,
+                            SignType,
+                            UserFullName);
+                    }
+
+                    if (htmlOutputs.Contains("DOCX"))
+                    {
+                        var path = Path.Combine(folder, fileNames + ".docx");
+                        htmlOutputPaths["DOCX"] = FileHTMLToWord.ExportHtmlToWord(renderedHtmlPath, path);
+                    }
+
+                    // HTML remains the primary link written through the existing
+                    // procedure. Additional outputs are returned without changing
+                    // the legacy LinkFile meaning.
+                    LinkExportLocal = generatedFilePath;
+                    LinkExportView = linkview + "/" + fileNames + ".html";
+                }
 
 
                 // Step 5.1: Gộp file PDF nếu có FileAttach
@@ -241,7 +298,17 @@ namespace DMS.Controllers.Functions.Configs
                         request.EntryID,
                         request.OID.Replace("/", ""),
                         fileNames + ".html");
-                    AddPreviewLink(saveData, request.OID, previewLink);
+                    var outputLinks = new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase)
+                    {
+                        ["PreviewLinkFile"] = previewLink,
+                        ["HTMLLocalFile"] = generatedFilePath
+                    };
+                    foreach (var output in htmlOutputPaths.Where(output => !output.Key.Equals("HTML", StringComparison.OrdinalIgnoreCase)))
+                    {
+                        outputLinks[output.Key + "LocalFile"] = output.Value;
+                        outputLinks[output.Key + "LinkFile"] = linkview + "/" + fileNames + "." + output.Key.ToLowerInvariant();
+                    }
+                    AddOutputLinks(saveData, request.OID, outputLinks);
                 }
                
                 //CleanupOldFiles(folder, TimeSpan.FromMinutes(1));
@@ -360,6 +427,17 @@ namespace DMS.Controllers.Functions.Configs
 
         private static void AddPreviewLink(DataResponse response, string oid, string previewLink)
         {
+            AddOutputLinks(response, oid, new Dictionary<string, object>
+            {
+                ["PreviewLinkFile"] = previewLink
+            });
+        }
+
+        private static void AddOutputLinks(
+            DataResponse response,
+            string oid,
+            IReadOnlyDictionary<string, object> outputLinks)
+        {
             var rows = new List<Dictionary<string, object>>();
             if (response?.Result is IEnumerable result && response.Result is not string)
             {
@@ -371,7 +449,8 @@ namespace DMS.Controllers.Functions.Configs
                     var row = new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase);
                     foreach (var field in fields)
                         row[field.Key] = field.Value;
-                    row["PreviewLinkFile"] = previewLink;
+                    foreach (var output in outputLinks)
+                        row[output.Key] = output.Value;
                     rows.Add(row);
                 }
             }
@@ -381,11 +460,37 @@ namespace DMS.Controllers.Functions.Configs
                 rows.Add(new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase)
                 {
                     ["OID"] = oid,
-                    ["PreviewLinkFile"] = previewLink
                 });
+                foreach (var output in outputLinks)
+                    rows[0][output.Key] = output.Value;
             }
 
             response.Result = rows;
+        }
+
+        private static HashSet<string> ParseHtmlOutputFormats(string value)
+        {
+            var formats = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+            {
+                "HTML"
+            };
+            if (string.IsNullOrWhiteSpace(value))
+                return formats;
+
+            foreach (var format in value.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+            {
+                var normalized = format.Trim().ToUpperInvariant();
+                if (normalized == "ALL")
+                {
+                    formats.UnionWith(new[] { "PDF", "XLSX", "DOCX" });
+                    continue;
+                }
+
+                if (normalized is "PDF" or "XLSX" or "DOCX")
+                    formats.Add(normalized);
+            }
+
+            return formats;
         }
 
         private void CleanupOldFiles(string folderPath, TimeSpan maxAge)
