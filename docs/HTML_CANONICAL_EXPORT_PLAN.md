@@ -20,6 +20,138 @@ HTML phải giữ được form cố định, logo, bảng, ô gộp và vị tr
 Các trường không có dữ liệu tiếp tục giữ nguyên placeholder `@...`, không tự
 điền dữ liệu giả và không tự chèn chữ ký.
 
+## Luồng đang chạy hiện tại
+
+Phần này mô tả code thực tế trên branch hiện tại, không phải một flow giả lập:
+
+```text
+Swagger/API request
+  -> ExportPDFController
+  -> ExecExportPDF (Get-Info)
+       -> result: template, CurrentStep, UserFullName, SignType
+       -> JsonData: replacement fields + SignLink/SignNote
+       -> JsonTableData: các dòng bảng
+  -> chọn nhánh theo template/request
+       -> legacy XLS/XLSX -> FileExcelAPI -> PDF
+       -> legacy DOC/DOCX -> FileWord -> PDF
+       -> legacy PDF       -> FilePDF
+       -> HTML             -> FileHTML -> HTML đã render
+                                -> PDF  (tuỳ Extention2)
+                                -> XLSX (tuỳ Extention2)
+                                -> DOCX (tuỳ Extention2)
+  -> ExecExportPDF (Update-LinkExport)
+  -> response thêm local path/preview link/output links
+```
+
+### 1. Request và lấy dữ liệu
+
+- Endpoint chính cho flow mới là `POST /api/ExportPDF/ExportHTML`. Endpoint này
+  gán `Extention1=HTML` rồi dùng lại `ExportPDF`.
+- `ExportPDFController` vẫn gọi procedure `ExecExportPDF` với `@type=Get-Info`,
+  `FactorID`, `EntryID`, `OID`, `CmpnID`, ngôn ngữ và user hiện tại.
+- Khi chọn HTML, request gửi vào nhánh lấy thông tin của procedure với
+  `Extention1` rỗng để giữ branch dữ liệu legacy; `HTML` chỉ quyết định nhánh
+  lưu/render ở controller.
+- Controller đọc ba result set: metadata/template, `JsonData` và
+  `JsonTableData`. Nếu JSON rỗng thì dùng `{}`, nếu TableJson rỗng thì dùng
+  `[]`; không tự tạo dữ liệu nghiệp vụ.
+
+### 2. Chọn template và tạo đường dẫn
+
+- `safeOid` được tạo từ OID bằng cách đổi `/` hoặc `\\` thành `_`, sau đó nối
+  `CurrentStep` và Unix timestamp để tránh trùng tên file.
+- Thư mục lưu theo convention hiện có:
+
+  ```text
+  DiskFolderSave/CmpnID/FactorID/EntryID/OID-bỏ-dấu-
+  ```
+
+- Link view dùng cùng cấu trúc nhưng bắt đầu từ `LinkFolderSave` và dùng `/`.
+- Với HTML, `FileHTML.ResolveCanonicalTemplate` ưu tiên template HTML/HBS đã
+  cấu hình hoặc template canonical trong source. Nếu form chưa migrate, nó có
+  thể fallback về template Excel gốc để tạo HTML tương thích.
+
+### 3. Render HTML
+
+- `FileHTML` nhận nguyên `JsonData`, `JsonTableData`, `SignType` và
+  `UserFullName`; class này không truy vấn database.
+- Template được Handlebars render sau khi chuyển placeholder legacy `@Field`
+  thành binding. Giá trị không có trong JSON giữ nguyên placeholder.
+- TableJson được đọc qua logic dùng chung của `FileExcelAPI.ReadTableData`, sau
+  đó map thành `table_*` cho các block `{{#each ...}}`.
+- Nếu template đầu vào vẫn là workbook OpenXML, flow tương thích sẽ gọi
+  `FileExcelAPI.ExportTemplateToExcel` trước rồi dùng `FileExcelToHtml` để dựng
+  HTML; form khi đó vẫn bắt nguồn từ workbook gốc.
+
+### 4. Điều kiện và cách render chữ ký
+
+- Vị trí nào chỉ được render chữ ký khi chính JSON của procedure có giá trị
+  `@SignLink_C1` ... `@SignLink_C99` tương ứng. `SignNote` không tự kích hoạt
+  hình chữ ký.
+- Khi `SignLink` không có dữ liệu, `@SignLink_C*` và `@SignNote_C*` tương ứng
+  được giữ lại trong HTML.
+- Khi `SignLink` có dữ liệu, code mới kiểm tra/resolve file ảnh. `File.Exists`
+  chỉ xác nhận asset đã resolve được, không phải điều kiện nghiệp vụ để quyết
+  định một ô có được ký hay không.
+- Với SVG, flow dùng `FileSVG.ReplaceAndConvertSvgToPng`, thay
+  `@UserName` bằng `UserFullName`, thay `@NgayKy` bằng thời điểm render, rồi
+  nhúng PNG dưới dạng `data:image/png;base64`.
+- `HtmlPrintLayout` được áp dụng sau render và bổ sung CSS `@media print`;
+  CSS này chỉ tác động khi in/PDF, không thay đổi form hiển thị thông thường.
+
+### 5. Sinh các output từ HTML
+
+HTML luôn được lưu trước. `Extention2` quyết định output bổ sung:
+
+| `Extention2` | Output |
+|---|---|
+| rỗng | HTML |
+| `PDF` | HTML + PDF |
+| `XLSX` | HTML + XLSX + PDF |
+| `DOCX` | HTML + DOCX + PDF |
+| `ALL` | HTML + PDF + XLSX + DOCX |
+
+- HTML → PDF dùng `FileHTMLToPdf`: cấu hình A4 portrait, margin cố định,
+  DPI/viewport/zoom cố định và print media. Native `wkhtmltopdf` được thử
+  trước; nếu native không khả dụng trên macOS thì tự tìm Chrome/Chromium để
+  render headless.
+- HTML → XLSX dùng `FileHTMLToExcelTemplate`: đọc các binding
+  `data-excel-field` từ HTML nhưng áp dữ liệu lên template XLSX gốc, nhờ đó
+  giữ merge cell, logo, ảnh, style và print settings của Excel.
+- HTML → DOCX dùng `FileHTMLToWord`: đọc bảng, text và ảnh theo HTML contract;
+  không cam kết tái tạo mọi CSS tùy ý.
+
+### 6. Ghi nhận DB và response
+
+- Sau khi tạo file, controller gọi lại `ExecExportPDF` với
+  `@type=Update-LinkExport` để cập nhật link HTML chính vào flow legacy.
+- `LinkFile`/`LinkExportView` là link storage remote; chỉ truy cập được khi
+  IIS/file server đang phục vụ đúng thư mục vật lý.
+- Development trả thêm `PreviewLinkFile` trỏ vào
+  `GET /api/ExportPDF/PreviewHTML?path=...`, cùng `HTMLLocalFile`. Các output
+  bổ sung được trả bằng cặp `PDFLocalFile`/`PDFLinkFile`,
+  `XLSXLocalFile`/`XLSXLinkFile`, `DOCXLocalFile`/`DOCXLinkFile`.
+- Các output bổ sung chưa được ghi vào các cột DB riêng; controller không tự
+  thay đổi ý nghĩa `LinkFile` legacy.
+
+### 7. Nhánh legacy không đi qua HTML
+
+Nếu template không được chọn là HTML, controller giữ các nhánh cũ:
+
+- `.XLS/.XLSX`: `FileExcelAPI.ExportTemplateToPdf`;
+- `.DOC/.DOCX`: `FileWord.ExportTemplateToPdf`;
+- `.PDF`: `FilePDF.ExportTemplateToPdf`;
+- gộp `FileAttach` chỉ chạy trong nhánh legacy PDF, không chạy cho HTML.
+
+### 8. Lưu ý môi trường local
+
+Trên Windows, `DiskFolderSave` dạng `D:\\IIS\\TMS...` là đường dẫn tuyệt đối.
+Trên macOS, cùng chuỗi đó có thể bị tạo thành thư mục literal `D:\\IIS\\...`
+trong workspace nếu adapter nhận path Windows chưa được mount/đổi cấu hình.
+Đây là vấn đề môi trường/path, không phải một thư mục nghiệp vụ thứ hai. File
+sinh ra ở `SALE_SHIPPINGPRICE` đã được ignore; template trong `Configuration`
+vẫn phải giữ lại.
+
 Khi xuất XLSX từ HTML đã chỉnh sửa, HTML chỉ là nguồn dữ liệu. Layout XLSX
 vẫn lấy từ template OpenXML gốc; không dựng một workbook mới từ các thẻ HTML.
 
@@ -149,8 +281,9 @@ HTML và DOCX được tạo hợp lệ; thiếu chữ ký giữ placeholder, c�
 `SignLink_C1` thì chỉ C1 được chuyển SVG → PNG → base64. XLSX đã được nhập
 qua `FileHTMLToExcelTemplate` và giữ nguyên workbook gốc (worksheet,
 merge/layout và logo; số merge tăng tương ứng với số dòng bảng được chèn).
-PDF đã build qua adapter nhưng không thể chạy native `wkhtmltopdf` trên macOS
-hiện tại do thiếu thư viện nền; cần xác nhận thêm trên Windows/IIS.
+PDF trên macOS dùng Chromium fallback vì native `wkhtmltopdf` không tải được;
+ba file demo 00001–00003 đã được kiểm tra là A4 portrait, một trang và không
+bị cắt cột.
 
 ## Ngoài phạm vi đợt đầu
 
