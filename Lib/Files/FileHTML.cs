@@ -35,7 +35,11 @@ public static class FileHTML
         string entryId)
     {
         if (IsHtmlTemplate(templatePath))
-            return templatePath;
+        {
+            var existingTemplate = ResolveExistingPath(templatePath);
+            if (File.Exists(existingTemplate))
+                return existingTemplate;
+        }
 
         var candidates = new List<string>();
         if (!string.IsNullOrWhiteSpace(templatePath))
@@ -70,9 +74,13 @@ public static class FileHTML
         string templatePath,
         string templateRoot,
         string factorId,
-        string entryId)
+        string entryId,
+        string templateOverride = "")
     {
         var candidates = new List<string>();
+        if (!string.IsNullOrWhiteSpace(templateOverride))
+            candidates.Add(templateOverride);
+
         var resolvedTemplate = ResolveExistingPath(templatePath);
         if (!string.IsNullOrWhiteSpace(resolvedTemplate))
             candidates.Add(resolvedTemplate);
