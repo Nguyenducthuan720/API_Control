@@ -124,6 +124,9 @@ namespace DMS.Controllers.Functions.Configs
 
                 folder = folder.Replace('/', '\\').Replace(@"\\", @"\");
                 linkview = linkview.Replace('\\', '/').Replace(@"\\", @"/");
+                var outputFolder = OperatingSystem.IsWindows()
+                    ? folder
+                    : Path.GetFullPath(folder.Replace('\\', Path.DirectorySeparatorChar));
 
 
                 string fileExtension = Path.GetExtension(exportTemplate)?.ToUpperInvariant() ?? string.Empty;
@@ -140,7 +143,7 @@ namespace DMS.Controllers.Functions.Configs
                         request.EntryID);
                     generatedFilePath = await FileHTML.ExportTemplateToHtmlAsync(
                         htmlTemplate,
-                        folder,
+                        outputFolder,
                         safeOid,
                         json,
                         SignType,
@@ -205,7 +208,7 @@ namespace DMS.Controllers.Functions.Configs
                     var renderedHtmlPath = generatedFilePath;
                     if (htmlOutputs.Contains("PDF"))
                     {
-                        var path = Path.Combine(folder, fileNames + ".pdf");
+                        var path = Path.Combine(outputFolder, fileNames + ".pdf");
                         htmlOutputPaths["PDF"] = FileHTMLToPdf.ExportHtmlToPdf(
                             renderedHtmlPath,
                             path,
@@ -215,12 +218,15 @@ namespace DMS.Controllers.Functions.Configs
 
                     if (htmlOutputs.Contains("XLSX"))
                     {
-                        var path = Path.Combine(folder, fileNames + ".xlsx");
+                        var path = Path.Combine(outputFolder, fileNames + ".xlsx");
                         var excelTemplate = FileHTML.ResolveOriginalExcelTemplate(
                             exportTemplate,
                             _configuration["ExportHtml:ExcelTemplateRoot"],
                             request.FactorID,
-                            request.EntryID);
+                            request.EntryID,
+                            _environment.IsDevelopment()
+                                ? _configuration["ExportHtml:ExcelTemplatePath"]
+                                : string.Empty);
                         htmlOutputPaths["XLSX"] = FileHTMLToExcelTemplate.ExportHtmlToExcel(
                             renderedHtmlPath,
                             excelTemplate,
@@ -231,7 +237,7 @@ namespace DMS.Controllers.Functions.Configs
 
                     if (htmlOutputs.Contains("DOCX"))
                     {
-                        var path = Path.Combine(folder, fileNames + ".docx");
+                        var path = Path.Combine(outputFolder, fileNames + ".docx");
                         htmlOutputPaths["DOCX"] = FileHTMLToWord.ExportHtmlToWord(renderedHtmlPath, path);
                     }
 
@@ -328,14 +334,6 @@ namespace DMS.Controllers.Functions.Configs
             {
                 return Ok(new DataResponse(ex.Message, "", "-1"));
             }
-        }
-
-        [HttpPost]
-        public async Task<IActionResult> ExportHTML(ExportPDF.Request.Get request)
-        {
-            request ??= new ExportPDF.Request.Get();
-            request.Extention1 = "HTML";
-            return await ExportPDF(request);
         }
 
         [AllowAnonymous]
